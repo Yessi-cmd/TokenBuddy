@@ -1,0 +1,4 @@
+this is intentionally not json
+{"type":"response.completed","session_id":"malformed-session","timestamp":"2026-07-25T11:00:01Z","request_id":"valid-request","usage":{"input_tokens":12,"output_tokens":4}}
+{"type":"response.completed","session_id":"malformed-session","request_id":"missing-timestamp","usage":{"input_tokens":20,"output_tokens":5}}
+{"type":"response.completed","session_id":"malformed-session","timestamp":"2026-07-25T11:00:03Z","usage":{"total_tokens":"not-a-number"}}

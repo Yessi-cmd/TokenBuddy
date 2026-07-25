@@ -1,0 +1,5 @@
+{"type":"session_meta","session_id":"snapshot-session","timestamp":"2026-07-25T09:00:00Z","cwd":"/sanitized/snapshot-project"}
+{"type":"token_count","session_id":"snapshot-session","timestamp":"2026-07-25T09:00:01Z","total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":140}}
+{"type":"token_count","session_id":"snapshot-session","timestamp":"2026-07-25T09:00:02Z","total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":140}}
+{"type":"token_count","session_id":"snapshot-session","timestamp":"2026-07-25T09:00:03Z","total_token_usage":{"input_tokens":150,"cached_input_tokens":30,"output_tokens":60,"reasoning_output_tokens":15,"total_tokens":210}}
+{"type":"token_count","session_id":"snapshot-session","timestamp":"2026-07-25T09:00:04Z","total_token_usage":{"input_tokens":90,"cached_input_tokens":10,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120}}

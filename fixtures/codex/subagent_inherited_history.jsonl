@@ -1,0 +1,5 @@
+{"type":"session_meta","session_id":"parent-session","timestamp":"2026-07-25T10:00:00Z","cwd":"/sanitized/agent-project"}
+{"type":"response.completed","session_id":"parent-session","timestamp":"2026-07-25T10:00:01Z","request_id":"parent-request","response_id":"parent-response","model":"gpt-5-codex","usage":{"input_tokens":80,"cached_input_tokens":10,"output_tokens":20,"reasoning_output_tokens":4}}
+{"type":"subagent_started","session_id":"child-session","parent_session_id":"parent-session","timestamp":"2026-07-25T10:00:02Z","cwd":"/sanitized/agent-project"}
+{"type":"history_inherited","session_id":"child-session","parent_session_id":"parent-session","inherited":true,"timestamp":"2026-07-25T10:00:03Z","history":[{"request_id":"parent-request","usage":{"input_tokens":80,"cached_input_tokens":10,"output_tokens":20,"reasoning_output_tokens":4}}]}
+{"type":"response.completed","session_id":"child-session","parent_session_id":"parent-session","timestamp":"2026-07-25T10:00:04Z","request_id":"child-request","response_id":"child-response","model":"gpt-5-codex","usage":{"input_tokens":50,"cached_input_tokens":5,"output_tokens":12,"reasoning_output_tokens":2}}

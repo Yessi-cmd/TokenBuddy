@@ -1794,14 +1794,22 @@ T014 添加 CI 编译与测试
 # 34. 实施状态
 
 ```text
-[ ] Phase 0：仓库初始化
-[ ] Phase 1：数据核心
-[ ] Phase 2：Codex Session
+[x] Phase 0：仓库初始化
+[x] Phase 1：数据核心
+[x] Phase 2：Codex Session
 [ ] Phase 3：Claude Session
-[ ] Phase 4：桌面面板
+[x] Phase 4：桌面面板
 [ ] Phase 5：OTel
 [ ] Phase 6：CC Switch / Cockpit
 [ ] Phase 7：可选本地代理
 ```
 
-最近更新：2026-07-25
+最近更新：2026-07-26
+
+Phase 0 已完成：Tauri 2 + React + TypeScript 桌面壳、Rust workspace、格式化/lint/test/build 命令和 macOS/Windows CI 配置均已建立。Windows 构建仍需在远程 GitHub Actions 环境中执行确认。
+
+Phase 1 已完成：共享 domain 类型、SQLite 初始迁移、sources/sessions/usage_events/import_cursors 持久化、稳定 raw event hash、幂等批量导入、精度分级和缺失值语义已实现。代理、OTel、CC Switch 和 Cockpit 仍未实现。
+
+Phase 2 已完成：Codex 脱敏 JSONL fixture、普通 usage 与累计快照解析、重复快照去重、回退重置、子 Agent 继承历史跳过、坏行降级、文件 cursor 增量导入、文件轮转签名检测、会话聚合和 macOS/Windows 默认路径检测已实现。
+
+Phase 4 已完成：Tauri commands 已提供 dashboard、session list/detail、usage event 和 source 查询；最小 Dashboard、会话列表/详情时间线、精度徽标、Codex 路径检测和显式扫描入口已完成。T014 CI 已加入 macOS/Windows 的前端、Rust 测试、lint、检查和 Tauri 无 bundle 编译步骤。

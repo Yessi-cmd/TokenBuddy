@@ -12,6 +12,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build.workspace = true
 
 [dependencies]
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri.workspace = true
+tokenbuddy-codex-session = { path = "../../../crates/adapters/codex-session" }
+tokenbuddy-domain.workspace = true
+tokenbuddy-storage.workspace = true
