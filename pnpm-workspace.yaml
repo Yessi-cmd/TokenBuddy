@@ -1,0 +1,4 @@
+packages:
+  - apps/*
+minimumReleaseAgeExclude:
+  - eslint@10.8.0

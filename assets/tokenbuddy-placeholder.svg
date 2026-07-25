@@ -1,0 +1,36 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 1024 1024"
+  role="img"
+  aria-labelledby="title description"
+>
+  <title id="title">TokenBuddy placeholder icon</title>
+  <desc id="description">
+    Two overlapping token shapes representing unified token observability.
+  </desc>
+  <rect width="1024" height="1024" rx="224" fill="#163d33" />
+  <circle cx="410" cy="512" r="246" fill="#f4f7ef" />
+  <circle
+    cx="410"
+    cy="512"
+    r="158"
+    fill="none"
+    stroke="#55b88c"
+    stroke-width="56"
+  />
+  <circle
+    cx="642"
+    cy="512"
+    r="194"
+    fill="#e8b85d"
+    stroke="#163d33"
+    stroke-width="44"
+  />
+  <path
+    d="M580 415h124M642 415v194"
+    fill="none"
+    stroke="#163d33"
+    stroke-linecap="round"
+    stroke-width="54"
+  />
+</svg>
