@@ -6,7 +6,7 @@
 
 | 指标 | 当前 | 目标 |
 |---|---|---|
-| 行覆盖率（cargo llvm-cov, workspace） | 77.63% → **82.83%** | ≥ 85% |
+| 行覆盖率（cargo llvm-cov, workspace） | 77.63% → **83.70%** | ≥ 85% |
 | clippy 警告（`-D warnings`） | 0 | 0 |
 | `missing_docs` 待补项 | 436 → **162** | 0 |
 | README 与代码一致 | 否 → **是** | 是 |
@@ -37,9 +37,8 @@
       330 行未覆盖，集中在错误分支：适配器失败落库、设置更新、四个 detect 入口、
       watcher 路径推导、保留策略。
 
-- [ ] **M2 · `crates/domain` 覆盖率 66.84% → ≥85%**（影响：`crates/domain/src/lib.rs`）
-      64 行未覆盖，全是纯函数（枚举 as_str/Display、UsageTotals、NormalizedUsage 边界），
-      成本最低的一块。
+- [x] **M2 · `crates/domain` 覆盖率 68% → 92.73%** — 见 DONE.md。补测试时暴露并修复了两个
+      真实缺陷（serde 名与存储名不一致、`delta_from` 零增量）。
 
 - [ ] **M3 · `web.rs` 覆盖率 73.44% → ≥85%**（影响：`apps/desktop/src-tauri/src/web.rs`）
       187 行未覆盖：404/405 分支、静态文件 content-type、请求体超限、畸形请求行。

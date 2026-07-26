@@ -59,6 +59,11 @@ pub enum LauncherKind {
     /// The app talked to the provider itself.
     Direct,
     /// Routed by CC-Switch.
+    ///
+    /// Renamed explicitly: `rename_all = "snake_case"` turns `CCSwitch` into
+    /// `c_c_switch`, which would not match the name written to SQLite by
+    /// `as_str` nor the value the frontend's `LauncherKind` union declares.
+    #[serde(rename = "cc_switch")]
     CCSwitch,
     /// Routed by Cockpit Tools.
     Cockpit,
@@ -360,13 +365,35 @@ impl NormalizedUsage {
     /// moved backwards (the file rotated, or a new session reset it) or nothing
     /// changed. Callers treat `None` as "record nothing", which is what keeps a
     /// cumulative snapshot from being counted twice.
+    ///
+    /// "Nothing changed" covers a repeated snapshot, whose difference is zero
+    /// rather than absent: recording that would add an event worth no tokens
+    /// and inflate the request count.
     pub fn delta_from(&self, previous: &Self) -> Option<Self> {
         let current = self.checked_delta(previous)?;
-        if current.is_empty() {
+        if current.is_empty() || current.is_zero() {
             None
         } else {
             Some(current)
         }
+    }
+
+    /// Whether every field the source reported is zero.
+    ///
+    /// Distinct from [`is_empty`](Self::is_empty), which means the source
+    /// reported no field at all.
+    pub fn is_zero(&self) -> bool {
+        [
+            self.input_tokens_total,
+            self.input_tokens_uncached,
+            self.cache_read_tokens,
+            self.cache_write_tokens,
+            self.output_tokens_total,
+            self.reasoning_tokens,
+            self.visible_output_tokens,
+        ]
+        .into_iter()
+        .all(|value| value.unwrap_or(0) == 0)
     }
 
     /// Field-by-field subtraction that refuses to underflow.
@@ -1078,7 +1105,239 @@ pub struct PathCandidate {
 
 #[cfg(test)]
 mod tests {
-    use super::{NormalizedUsage, PrecisionLevel};
+    use std::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+    };
+
+    use super::{
+        AccountRecord, AdapterError, AppKind, CollectionStatus, IngestSource, LauncherKind,
+        NormalizedUsage, PrecisionLevel, UsageAdapter, UsageTotals, account_fingerprint,
+    };
+
+    /// `as_str` is what reaches SQLite; the serde representation is what reaches
+    /// the UI. They are documented as the same string, and a mismatch would let
+    /// a value written by one path fail to parse on the other.
+    #[test]
+    fn stored_and_serialized_names_agree_for_every_enum_variant() {
+        fn check<T: serde::Serialize + std::fmt::Display + Copy>(value: T, as_str: &str) {
+            let json = serde_json::to_string(&value).expect("serialize");
+            assert_eq!(json, format!("\"{as_str}\""), "serde name differs");
+            assert_eq!(value.to_string(), as_str, "Display differs");
+        }
+
+        for (value, name) in [
+            (AppKind::Codex, "codex"),
+            (AppKind::ClaudeCode, "claude_code"),
+            (AppKind::Unknown, "unknown"),
+        ] {
+            assert_eq!(value.as_str(), name);
+            check(value, name);
+        }
+        for (value, name) in [
+            (LauncherKind::Direct, "direct"),
+            (LauncherKind::CCSwitch, "cc_switch"),
+            (LauncherKind::Cockpit, "cockpit"),
+            (LauncherKind::ObserverProxy, "observer_proxy"),
+            (LauncherKind::Unknown, "unknown"),
+        ] {
+            assert_eq!(value.as_str(), name);
+            check(value, name);
+        }
+        for (value, name) in [
+            (IngestSource::SessionLog, "session_log"),
+            (IngestSource::Otel, "otel"),
+            (IngestSource::Proxy, "proxy"),
+            (IngestSource::QuotaApi, "quota_api"),
+            (IngestSource::ImportedDatabase, "imported_database"),
+            (IngestSource::Estimated, "estimated"),
+        ] {
+            assert_eq!(value.as_str(), name);
+            check(value, name);
+        }
+        for (value, name) in [
+            (PrecisionLevel::Verified, "verified"),
+            (PrecisionLevel::ExactSession, "exact_session"),
+            (PrecisionLevel::Correlated, "correlated"),
+            (PrecisionLevel::Estimated, "estimated"),
+            (PrecisionLevel::Unavailable, "unavailable"),
+        ] {
+            assert_eq!(value.as_str(), name);
+            check(value, name);
+        }
+        for (value, name) in [
+            (CollectionStatus::Starting, "starting"),
+            (CollectionStatus::Collecting, "collecting"),
+            (CollectionStatus::Idle, "idle"),
+            (CollectionStatus::Error, "error"),
+        ] {
+            assert_eq!(value.as_str(), name);
+            check(value, name);
+        }
+    }
+
+    #[test]
+    fn an_unchanged_cumulative_snapshot_yields_no_event() {
+        let snapshot = NormalizedUsage {
+            input_tokens_total: Some(100),
+            output_tokens_total: Some(40),
+            ..Default::default()
+        };
+        // Same totals twice means the log repeated itself; recording a
+        // zero-token event would inflate the event count for no usage.
+        assert_eq!(snapshot.delta_from(&snapshot), None);
+        // The raw subtraction still yields a value — it is zero, not absent —
+        // which is exactly why `delta_from` has to reject it.
+        let raw = snapshot.checked_delta(&snapshot).expect("subtractable");
+        assert!(!raw.is_empty());
+        assert!(raw.is_zero());
+        assert_eq!(raw.input_tokens_total, Some(0));
+    }
+
+    #[test]
+    fn a_field_absent_from_the_previous_snapshot_carries_through_whole() {
+        let previous = NormalizedUsage {
+            input_tokens_total: Some(100),
+            ..Default::default()
+        };
+        let current = NormalizedUsage {
+            input_tokens_total: Some(160),
+            // The source only started reporting this field now, so the whole
+            // value is new usage rather than an unmeasurable difference.
+            reasoning_tokens: Some(12),
+            ..Default::default()
+        };
+
+        let delta = current.delta_from(&previous).expect("delta");
+        assert_eq!(delta.input_tokens_total, Some(60));
+        assert_eq!(delta.reasoning_tokens, Some(12));
+        // A field neither snapshot reported stays unknown.
+        assert_eq!(delta.cache_read_tokens, None);
+    }
+
+    #[test]
+    fn totals_from_a_single_event_leave_cost_unknown() {
+        let usage = NormalizedUsage {
+            input_tokens_total: Some(100),
+            cache_read_tokens: Some(25),
+            output_tokens_total: Some(40),
+            ..Default::default()
+        };
+        let totals = UsageTotals::from_usage(1, &usage);
+
+        assert_eq!(totals.event_count, 1);
+        assert_eq!(totals.input_tokens_total, Some(100));
+        assert_eq!(totals.cache_hit_rate_percent, Some(25.0));
+        assert_eq!(totals.total_tokens(), Some(140));
+        // No price table exists, so cost is unavailable — not zero (spec §18.2).
+        assert_eq!(totals.provider_reported_cost, None);
+        assert_eq!(totals.estimated_cost, None);
+    }
+
+    #[test]
+    fn a_total_needs_both_sides_and_never_overflows() {
+        let one_sided = UsageTotals {
+            input_tokens_total: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(one_sided.total_tokens(), None);
+        assert_eq!(UsageTotals::default().total_tokens(), None);
+
+        let overflowing = UsageTotals {
+            input_tokens_total: Some(u64::MAX),
+            output_tokens_total: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(overflowing.total_tokens(), None);
+    }
+
+    #[test]
+    fn adapter_errors_cross_the_boundary_as_their_message() {
+        let error = AdapterError {
+            message: "Codex session directory was not found".to_owned(),
+        };
+        assert_eq!(error.to_string(), "Codex session directory was not found");
+        // It is a std error, so callers can chain it without a custom wrapper.
+        let _: &dyn std::error::Error = &error;
+    }
+
+    #[test]
+    fn watching_is_refused_by_default_rather_than_silently_doing_nothing() {
+        struct FileBackedAdapter;
+
+        impl UsageAdapter for FileBackedAdapter {
+            fn id(&self) -> &'static str {
+                "fixture"
+            }
+            fn display_name(&self) -> &'static str {
+                "Fixture"
+            }
+            async fn detect(&self) -> Result<super::DetectionResult, AdapterError> {
+                unimplemented!("not exercised")
+            }
+            async fn import_history(
+                &self,
+                _cursor: Option<super::ImportCursor>,
+            ) -> Result<super::ImportBatch, AdapterError> {
+                unimplemented!("not exercised")
+            }
+            async fn health(&self) -> Result<super::SourceHealth, AdapterError> {
+                unimplemented!("not exercised")
+            }
+        }
+
+        // An adapter that cannot push must say so: pretending to watch would
+        // stop collection without any error surfacing.
+        let refusal = futures_lite_block_on(FileBackedAdapter.start_watch(std::sync::Arc::new(
+            |_event: super::UsageEvent| unreachable!("no events are pushed"),
+        )));
+        assert!(refusal.is_err());
+    }
+
+    /// Minimal executor: the trait is async but the default body never awaits,
+    /// so polling once is enough and no runtime dependency is needed.
+    fn futures_lite_block_on<F: Future>(future: F) -> F::Output {
+        const VTABLE: RawWakerVTable =
+            RawWakerVTable::new(|data| RawWaker::new(data, &VTABLE), |_| {}, |_| {}, |_| {});
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+        match pin!(future).poll(&mut Context::from_waker(&waker)) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("the default implementation must not await"),
+        }
+    }
+
+    #[test]
+    fn a_fingerprint_hides_the_secret_and_depends_on_the_salt() {
+        let secret = "acct-fixture-0001";
+        let fingerprint = account_fingerprint("install-salt", secret);
+
+        assert_eq!(fingerprint.len(), 64, "SHA-256 hex");
+        assert!(!fingerprint.contains(secret));
+        // Stable for the same pair, different for another install.
+        assert_eq!(fingerprint, account_fingerprint("install-salt", secret));
+        assert_ne!(fingerprint, account_fingerprint("other-salt", secret));
+        // The separator keeps salt and secret from running together: without it
+        // these two pairs would hash identically.
+        assert_ne!(
+            account_fingerprint("ab", "cd"),
+            account_fingerprint("a", "bcd")
+        );
+
+        let record = AccountRecord {
+            id: "openai:chatgpt:0123456789abcdef".to_owned(),
+            provider_id: "openai".to_owned(),
+            display_name: Some("user@example.com".to_owned()),
+            account_fingerprint: fingerprint,
+            auth_mode: "chatgpt".to_owned(),
+            plan: Some("pro".to_owned()),
+        };
+        assert!(
+            !serde_json::to_string(&record)
+                .expect("json")
+                .contains(secret)
+        );
+    }
 
     #[test]
     fn cache_hit_rate_requires_known_non_zero_totals() {
