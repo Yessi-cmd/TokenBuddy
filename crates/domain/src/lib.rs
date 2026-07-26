@@ -388,6 +388,24 @@ pub struct AccountRecord {
     pub plan: Option<String>,
 }
 
+/// A period during which a launcher routed requests for one account.
+///
+/// Session logs never name an account, and `auth.json` only knows who is signed
+/// in *now*, so neither can attribute history when a launcher rotates several
+/// accounts. A launcher that proxied the requests does know which account served
+/// them and when — that turns account attribution into a time-window match
+/// (spec §17.2, `Correlated`) instead of a guess. Windows that overlap leave the
+/// answer ambiguous, and an ambiguous answer is reported as unknown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccountActivityWindow {
+    pub account_id: String,
+    pub source_id: String,
+    /// The app whose usage events this window may attribute.
+    pub app: AppKind,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AccountSummary {
     pub account: AccountRecord,
@@ -542,6 +560,7 @@ pub struct ImportBatch {
     pub source: Option<SourceRecord>,
     pub providers: Vec<ProviderRecord>,
     pub accounts: Vec<AccountRecord>,
+    pub account_windows: Vec<AccountActivityWindow>,
     pub attributions: Vec<SessionProviderAttribution>,
     pub sessions: Vec<SessionRecord>,
     pub usage_events: Vec<UsageEvent>,

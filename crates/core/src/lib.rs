@@ -699,7 +699,11 @@ impl Core {
             }
         }
         if let Some(db_path) = self.cockpit_db()? {
-            let adapter = CockpitAdapter::new(db_path);
+            // Cockpit is the only source that knows which of several rotating
+            // accounts served a Codex request, so it gets the fingerprint salt
+            // too — its account ids are stored hashed, never raw.
+            let salt = self.database_lock()?.local_salt()?;
+            let adapter = CockpitAdapter::new(db_path).with_fingerprint_salt(salt);
             if adapter.db_path().is_file() {
                 self.import_cockpit(adapter, &mut state)?;
             }
@@ -1127,6 +1131,8 @@ mod tests {
     use chrono::Utc;
     use tempfile::TempDir;
 
+    use tokenbuddy_domain::QuickSummary;
+
     use super::{Core, CoreConfig, account_rotation_detected};
 
     #[test]
@@ -1177,6 +1183,26 @@ mod tests {
         .expect("append fixture record");
     }
 
+    /// Wait until the Core's summary satisfies `predicate`, returning it.
+    fn wait_for_summary(
+        core: &Core,
+        predicate: impl Fn(&QuickSummary) -> bool,
+        timeout: Duration,
+    ) -> QuickSummary {
+        let started = Instant::now();
+        loop {
+            let summary = core.quick_summary().expect("quick summary");
+            if predicate(&summary) {
+                return summary;
+            }
+            assert!(
+                started.elapsed() < timeout,
+                "quick summary did not reach the expected state: {summary:?}"
+            );
+            thread::sleep(Duration::from_millis(15));
+        }
+    }
+
     fn wait_for_events(core: &Core, total: u64, timeout: Duration) {
         let started = Instant::now();
         loop {
@@ -1217,25 +1243,19 @@ mod tests {
         )
         .expect("append fixture record");
 
-        let started = Instant::now();
-        loop {
-            if core
-                .list_usage_events(None, 50, 0)
-                .expect("poll events")
-                .total
-                == 3
-            {
-                break;
-            }
-            assert!(started.elapsed() < std::time::Duration::from_secs(2));
-            thread::sleep(std::time::Duration::from_millis(15));
-        }
+        wait_for_events(&core, 3, Duration::from_secs(2));
 
-        let summary = core.quick_summary().expect("quick summary");
+        // The summary is refreshed *after* the events land, so waiting on the
+        // event count alone can observe the previous summary. Poll the value the
+        // assertions are about instead of assuming the two steps are atomic.
+        let summary = wait_for_summary(
+            &core,
+            |summary| summary.session_output_tokens == Some(78),
+            Duration::from_secs(2),
+        );
         assert_eq!(summary.active_app, Some(tokenbuddy_domain::AppKind::Codex));
         assert!(summary.active_session_id.is_some());
         assert_eq!(summary.model.as_deref(), Some("gpt-5-codex"));
-        assert_eq!(summary.session_output_tokens, Some(78));
         assert_eq!(summary.today_total_tokens, Some(28));
         core.shutdown().expect("core stops");
     }

@@ -17,17 +17,18 @@
 //! never touched.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags, Row};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokenbuddy_domain::{
-    DetectionResult, ImportBatch, ImportCursor, LauncherKind, ProviderRecord, SourceHealth,
-    SourceRecord,
+    AccountActivityWindow, AccountRecord, AppKind, DetectionResult, ImportBatch, ImportCursor,
+    LauncherKind, ProviderRecord, SourceHealth, SourceRecord,
 };
 
 pub const SOURCE_ID: &str = "cockpit";
@@ -36,6 +37,18 @@ pub const DISPLAY_NAME: &str = "Cockpit Tools";
 pub const DB_FILENAME: &str = "codex_local_access_logs.sqlite";
 pub const HOME_DIRNAME: &str = ".antigravity_cockpit";
 const LOGS_RESOURCE_ID: &str = "request_logs";
+/// Cockpit's accounts are ChatGPT accounts; the quota and the plan belong to
+/// OpenAI, not to the launcher that routed the request.
+const UPSTREAM_PROVIDER_ID: &str = "openai";
+const UPSTREAM_PROVIDER_DISPLAY_NAME: &str = "OpenAI";
+const AUTH_MODE: &str = "cockpit";
+/// A silence longer than this ends an activity window: Cockpit may have
+/// switched accounts, and a window spanning the switch would claim requests the
+/// other account served.
+const WINDOW_GAP_SECONDS: i64 = 30 * 60;
+/// The proxy and the Codex rollout log timestamp the same request a moment
+/// apart, so windows are padded before matching.
+const WINDOW_PADDING_SECONDS: i64 = 60;
 
 #[derive(Debug, Error)]
 pub enum CockpitAdapterError {
@@ -46,6 +59,7 @@ pub enum CockpitAdapterError {
 #[derive(Debug, Clone)]
 pub struct CockpitAdapter {
     db_path: PathBuf,
+    fingerprint_salt: Option<String>,
 }
 
 impl CockpitAdapter {
@@ -54,7 +68,17 @@ impl CockpitAdapter {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             db_path: resolve_db_path(path.into()),
+            fingerprint_salt: None,
         }
+    }
+
+    /// Supply the per-install salt used to fingerprint account ids (spec §20.2).
+    /// Without it the adapter reports no accounts — Cockpit's account ids are
+    /// stored hashed or not at all.
+    #[must_use]
+    pub fn with_fingerprint_salt(mut self, salt: impl Into<String>) -> Self {
+        self.fingerprint_salt = Some(salt.into());
+        self
     }
 
     pub fn db_path(&self) -> &Path {
@@ -128,6 +152,77 @@ impl CockpitAdapter {
         }
     }
 
+    /// Turn each account's request instants into one account row plus the
+    /// windows it was active in.
+    ///
+    /// Requests closer together than [`WINDOW_GAP_SECONDS`] belong to the same
+    /// window; a longer silence ends it, because Cockpit may have switched
+    /// accounts in the meantime and a window that spans the switch would claim
+    /// another account's requests. Each window is padded by
+    /// [`WINDOW_PADDING_SECONDS`] so the Codex log's own timestamp — written at
+    /// a slightly different moment than the proxy's — still falls inside.
+    fn push_accounts_and_windows(
+        &self,
+        account_activity: BTreeMap<String, AccountActivity>,
+        batch: &mut ImportBatch,
+    ) {
+        let Some(salt) = self.fingerprint_salt.as_deref() else {
+            return;
+        };
+        if account_activity.is_empty() {
+            return;
+        }
+
+        batch.providers.push(ProviderRecord {
+            id: UPSTREAM_PROVIDER_ID.to_owned(),
+            provider_family: UPSTREAM_PROVIDER_ID.to_owned(),
+            display_name: UPSTREAM_PROVIDER_DISPLAY_NAME.to_owned(),
+            upstream_url: None,
+            launcher: Some(LauncherKind::Cockpit),
+            source_id: Some(SOURCE_ID.to_owned()),
+        });
+
+        for (account_key, mut activity) in account_activity {
+            let fingerprint = fingerprint(salt, &account_key);
+            let account_id = format!("{SOURCE_ID}:{}", &fingerprint[..16]);
+            batch.accounts.push(AccountRecord {
+                id: account_id.clone(),
+                provider_id: UPSTREAM_PROVIDER_ID.to_owned(),
+                display_name: Some(
+                    activity
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| format!("Cockpit 账号 · {}", &fingerprint[..8])),
+                ),
+                account_fingerprint: fingerprint,
+                auth_mode: AUTH_MODE.to_owned(),
+                // Cockpit's request log does not state a subscription plan.
+                plan: None,
+            });
+
+            activity.instants.sort_unstable();
+            let mut window: Option<(DateTime<Utc>, DateTime<Utc>)> = None;
+            for instant in activity.instants {
+                window = match window {
+                    Some((start, end))
+                        if instant.signed_duration_since(end).num_seconds()
+                            <= WINDOW_GAP_SECONDS =>
+                    {
+                        Some((start, instant))
+                    }
+                    Some((start, end)) => {
+                        push_window(batch, &account_id, start, end);
+                        Some((instant, instant))
+                    }
+                    None => Some((instant, instant)),
+                };
+            }
+            if let Some((start, end)) = window {
+                push_window(batch, &account_id, start, end);
+            }
+        }
+    }
+
     fn import_request_logs(
         &self,
         connection: &Connection,
@@ -152,6 +247,11 @@ impl CockpitAdapter {
         let mut max_timestamp = since;
         let mut skipped = 0_usize;
 
+        // Per account: the label to show and every instant it served a request.
+        // Those instants become the activity windows that let a Codex usage
+        // event find its account by time.
+        let mut account_activity = BTreeMap::<String, AccountActivity>::new();
+
         let mut rows = statement.query([since])?;
         while let Some(row) = rows.next()? {
             if string_col(row, &names, "event_key").is_none() {
@@ -159,10 +259,10 @@ impl CockpitAdapter {
                 continue;
             }
             let timestamp = int_col(row, &names, "timestamp").unwrap_or(0);
-            if epoch_to_utc(timestamp).is_none() {
+            let Some(occurred_at) = epoch_to_utc(timestamp) else {
                 skipped += 1;
                 continue;
-            }
+            };
             max_timestamp = max_timestamp.max(timestamp);
 
             // Record which gateways served traffic. Tokens deliberately stay out
@@ -171,7 +271,25 @@ impl CockpitAdapter {
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "cockpit".to_owned());
             referenced_providers.insert(gateway_mode);
+
+            // Cockpit rotates several ChatGPT accounts through one Codex Home,
+            // so which account served a request is knowable only here.
+            if let Some(account_key) = string_col(row, &names, "account_id")
+                .filter(|value| !value.is_empty())
+                .or_else(|| string_col(row, &names, "email").filter(|value| !value.is_empty()))
+            {
+                let activity = account_activity
+                    .entry(account_key)
+                    .or_default();
+                if activity.label.is_none() {
+                    activity.label =
+                        string_col(row, &names, "email").filter(|value| !value.is_empty());
+                }
+                activity.instants.push(occurred_at);
+            }
         }
+
+        self.push_accounts_and_windows(account_activity, batch);
 
         for gateway_mode in referenced_providers {
             batch.providers.push(ProviderRecord {
@@ -226,6 +344,37 @@ pub fn default_cockpit_db() -> Option<PathBuf> {
     #[cfg(not(windows))]
     let home = std::env::var_os("HOME");
     home.map(|home| PathBuf::from(home).join(HOME_DIRNAME).join(DB_FILENAME))
+}
+
+#[derive(Debug, Default)]
+struct AccountActivity {
+    label: Option<String>,
+    instants: Vec<DateTime<Utc>>,
+}
+
+fn push_window(
+    batch: &mut ImportBatch,
+    account_id: &str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) {
+    let padding = Duration::seconds(WINDOW_PADDING_SECONDS);
+    batch.account_windows.push(AccountActivityWindow {
+        account_id: account_id.to_owned(),
+        source_id: SOURCE_ID.to_owned(),
+        // Cockpit routes Codex; it never sits in front of Claude Code.
+        app: AppKind::Codex,
+        started_at: start - padding,
+        ended_at: end + padding,
+    });
+}
+
+fn fingerprint(salt: &str, secret: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
+    hasher.update([0x00]);
+    hasher.update(secret.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn table_exists(connection: &Connection, table: &str) -> Result<bool, CockpitAdapterError> {
@@ -288,8 +437,9 @@ fn now() -> DateTime<Utc> {
 mod tests {
     use std::collections::HashMap;
 
+    use chrono::Duration;
     use rusqlite::Connection;
-    use tokenbuddy_domain::LauncherKind;
+    use tokenbuddy_domain::{AppKind, LauncherKind};
 
     use super::{CockpitAdapter, LOGS_RESOURCE_ID};
 
@@ -364,6 +514,89 @@ mod tests {
             .expect("provider record");
         assert_eq!(provider.display_name, "Cockpit · proxy");
         assert_eq!(provider.launcher, Some(LauncherKind::Cockpit));
+    }
+
+    /// Two accounts, each serving a burst of requests, with a long silence
+    /// between them — the shape Cockpit produces when it rotates accounts.
+    fn write_multi_account_fixture() -> tempfile::TempDir {
+        let dir = write_fixture(false);
+        let connection =
+            Connection::open(dir.path().join(super::DB_FILENAME)).expect("open fixture");
+        connection
+            .execute_batch(
+                "INSERT INTO request_logs
+                     (event_key, timestamp, request_id, account_id, email, model_id,
+                      gateway_mode, service_tier, success, http_status, latency_ms,
+                      input_tokens, output_tokens, total_tokens, cached_tokens,
+                      reasoning_tokens, estimated_cost_usd) VALUES
+                     ('a-1', 1785000000, 'r1', 'codex_plus', 'plus@example.com', 'gpt-5-codex',
+                      'proxy', 'default', 1, 200, 300, 10, 5, 15, 0, 0, 0.01),
+                     ('a-2', 1785000300, 'r2', 'codex_plus', 'plus@example.com', 'gpt-5-codex',
+                      'proxy', 'default', 1, 200, 300, 10, 5, 15, 0, 0, 0.01),
+                     ('b-1', 1785100000, 'r3', 'codex_team', 'team@example.com', 'gpt-5-codex',
+                      'proxy', 'default', 1, 200, 300, 10, 5, 15, 0, 0, 0.01);",
+            )
+            .expect("seed rows");
+        dir
+    }
+
+    #[test]
+    fn rotating_accounts_become_separate_accounts_with_their_own_activity_windows() {
+        let dir = write_multi_account_fixture();
+        let adapter = CockpitAdapter::new(dir.path().join(super::DB_FILENAME))
+            .with_fingerprint_salt("fixture-salt");
+        let batch = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("import");
+
+        let mut labels = batch
+            .accounts
+            .iter()
+            .map(|account| account.display_name.clone().expect("label"))
+            .collect::<Vec<_>>();
+        labels.sort();
+        assert_eq!(labels, vec!["plus@example.com", "team@example.com"]);
+        for account in &batch.accounts {
+            assert_eq!(account.auth_mode, "cockpit");
+            assert_eq!(account.provider_id, "openai");
+            // Cockpit's raw account id never leaves the adapter.
+            assert!(!account.account_fingerprint.contains("codex_"));
+            assert!(!account.id.contains("codex_"));
+        }
+
+        // Two bursts 300s apart stay one window; the 100_000s gap starts a new
+        // one for the other account.
+        assert_eq!(batch.account_windows.len(), 2);
+        for window in &batch.account_windows {
+            assert_eq!(window.app, AppKind::Codex);
+            assert_eq!(window.source_id, "cockpit");
+            assert!(window.started_at < window.ended_at);
+        }
+        let plus_account = batch
+            .accounts
+            .iter()
+            .find(|account| account.display_name.as_deref() == Some("plus@example.com"))
+            .expect("plus account");
+        let plus_window = batch
+            .account_windows
+            .iter()
+            .find(|window| window.account_id == plus_account.id)
+            .expect("plus window");
+        assert_eq!(
+            plus_window.ended_at - plus_window.started_at,
+            Duration::seconds(300 + 2 * super::WINDOW_PADDING_SECONDS)
+        );
+    }
+
+    #[test]
+    fn accounts_stay_unavailable_without_a_fingerprint_salt() {
+        let dir = write_multi_account_fixture();
+        let batch = CockpitAdapter::new(dir.path().join(super::DB_FILENAME))
+            .import_history_sync(&HashMap::new())
+            .expect("import");
+
+        assert!(batch.accounts.is_empty());
+        assert!(batch.account_windows.is_empty());
     }
 
     #[test]

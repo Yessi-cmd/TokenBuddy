@@ -6,11 +6,11 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use thiserror::Error;
 use tokenbuddy_domain::{
-    AccountRecord, AccountSummary, AppKind, AppSettings, CollectionStatus, DashboardSummary,
-    ExportResult, ImportBatch, ImportCursor, LauncherKind, ModelUsage, NormalizedUsage,
-    PrecisionLevel, ProviderRecord, ProviderSummary, QuickSummary, QuotaSnapshot, QuotaSummary,
-    SessionDetail, SessionPage, SessionProviderAttribution, SessionRecord, SessionSummary,
-    SourceRecord, UsageEvent, UsageEventPage, UsageFilters, UsageTotals,
+    AccountActivityWindow, AccountRecord, AccountSummary, AppKind, AppSettings, CollectionStatus,
+    DashboardSummary, ExportResult, ImportBatch, ImportCursor, LauncherKind, ModelUsage,
+    NormalizedUsage, PrecisionLevel, ProviderRecord, ProviderSummary, QuickSummary, QuotaSnapshot,
+    QuotaSummary, SessionDetail, SessionPage, SessionProviderAttribution, SessionRecord,
+    SessionSummary, SourceRecord, UsageEvent, UsageEventPage, UsageFilters, UsageTotals,
 };
 
 pub type Result<T> = std::result::Result<T, StorageError>;
@@ -45,6 +45,7 @@ pub struct ImportStats {
     pub updated_cursors: u64,
     pub upserted_accounts: u64,
     pub inserted_quota_snapshots: u64,
+    pub attributed_account_events: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -137,6 +138,15 @@ impl Database {
             upsert_account_record(&transaction, account)?;
         }
 
+        // Windows land before events so rows arriving in this batch resolve
+        // immediately, then backfill anything imported before the launcher was
+        // scanned — same ordering rule as provider attributions above.
+        for window in &batch.account_windows {
+            upsert_account_window(&transaction, window)?;
+        }
+        stats.attributed_account_events +=
+            backfill_account_windows(&transaction, &batch.account_windows)?;
+
         // Apply provider attributions before inserting events so rows landing in
         // this same batch already resolve to the real provider, and backfill any
         // events imported earlier under a guessed one.
@@ -168,8 +178,21 @@ impl Database {
                 ensure_provider(&transaction, derived, event)?;
                 ensure_account(&transaction, derived)?;
             }
-            let inserted =
-                insert_usage_event(&transaction, event, derived.as_ref(), attributed.as_ref())?;
+            // A launcher that routed this request at this instant outranks the
+            // placeholder account derived from the model name, but never a
+            // launcher-reported attribution or an account the adapter resolved.
+            let windowed_account = if attributed.is_none() && event.account_id.is_none() {
+                account_at(&transaction, event.app, event.occurred_at)?
+            } else {
+                None
+            };
+            let inserted = insert_usage_event(
+                &transaction,
+                event,
+                derived.as_ref(),
+                attributed.as_ref(),
+                windowed_account.as_deref(),
+            )?;
             if inserted {
                 stats.inserted_events += 1;
             } else {
@@ -1326,6 +1349,98 @@ fn upsert_provider_record(conn: &Connection, provider: &ProviderRecord) -> Resul
     Ok(())
 }
 
+fn upsert_account_window(conn: &Connection, window: &AccountActivityWindow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO account_activity_windows (
+             account_id, source_id, app, started_at, ended_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(account_id, source_id, started_at) DO UPDATE SET
+             ended_at = MAX(excluded.ended_at, account_activity_windows.ended_at),
+             updated_at = excluded.updated_at",
+        params![
+            window.account_id,
+            window.source_id,
+            window.app.as_str(),
+            window.started_at.to_rfc3339(),
+            window.ended_at.to_rfc3339(),
+            now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// The account that was serving `app` at `occurred_at`, or `None`.
+///
+/// Returns `None` when several accounts' windows cover the instant: overlapping
+/// windows mean the launcher's log cannot say which account served this request,
+/// and a coin flip between two real accounts is worse than `Unavailable`.
+fn account_at(
+    conn: &Connection,
+    app: AppKind,
+    occurred_at: DateTime<Utc>,
+) -> Result<Option<String>> {
+    let timestamp = occurred_at.to_rfc3339();
+    let mut statement = conn.prepare(
+        "SELECT DISTINCT account_id
+           FROM account_activity_windows
+          WHERE app = ?1 AND started_at <= ?2 AND ended_at >= ?2
+          LIMIT 2",
+    )?;
+    let mut accounts = statement
+        .query_map(params![app.as_str(), timestamp], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if accounts.len() == 1 {
+        Ok(accounts.pop())
+    } else {
+        Ok(None)
+    }
+}
+
+/// Attach newly imported windows to events that were stored before the launcher
+/// was scanned, where exactly one account covers the timestamp.
+///
+/// Events still carrying the placeholder account that storage derives from a
+/// model name are rewritten too: a launcher that actually routed the request
+/// outranks a per-provider bucket, the same way a launcher-reported provider
+/// outranks one guessed from the model. An account another source resolved for
+/// real is left alone.
+fn backfill_account_windows(conn: &Connection, windows: &[AccountActivityWindow]) -> Result<u64> {
+    let mut updated = 0;
+    for window in windows {
+        updated += conn.execute(
+            "UPDATE usage_events
+                SET account_id = ?1,
+                    precision_account = ?2
+              WHERE (
+                    account_id IS NULL
+                    OR account_id IN (
+                        SELECT id FROM accounts WHERE auth_mode = 'session_log'
+                    )
+                )
+                AND app = ?3
+                AND occurred_at >= ?4
+                AND occurred_at <= ?5
+                AND NOT EXISTS (
+                    SELECT 1 FROM account_activity_windows w
+                     WHERE w.app = usage_events.app
+                       AND w.account_id <> ?1
+                       AND w.started_at <= usage_events.occurred_at
+                       AND w.ended_at >= usage_events.occurred_at
+                )",
+            params![
+                window.account_id,
+                PrecisionLevel::Correlated.as_str(),
+                window.app.as_str(),
+                window.started_at.to_rfc3339(),
+                window.ended_at.to_rfc3339(),
+            ],
+        )? as u64;
+    }
+    Ok(updated)
+}
+
 /// Persist an account a source actually identified. `display_name`, `plan` and
 /// `auth_mode` are refreshed on every import (a plan can change), but a stored
 /// value is never replaced by a missing one.
@@ -1436,6 +1551,7 @@ fn insert_usage_event(
     event: &UsageEvent,
     derived: Option<&DerivedProvider>,
     attributed: Option<&SessionProviderAttribution>,
+    windowed_account: Option<&str>,
 ) -> Result<bool> {
     let raw_usage_json = event
         .raw_usage_json
@@ -1451,7 +1567,15 @@ fn insert_usage_event(
     let account_id = attributed
         .and_then(|value| value.account_id.clone())
         .or_else(|| event.account_id.clone())
+        .or_else(|| windowed_account.map(str::to_owned))
         .or_else(|| derived.map(|derived| derived.account_id.clone()));
+    // A time-window match is a correlation; say so rather than inheriting the
+    // adapter's precision for an account it never saw.
+    let precision_account = if windowed_account.is_some() {
+        PrecisionLevel::Correlated
+    } else {
+        event.precision_account
+    };
     let changed = conn.execute(
         "INSERT INTO usage_events (
              id, occurred_at, app, launcher, ingest_source, source_id,
@@ -1499,7 +1623,7 @@ fn insert_usage_event(
             event.precision_token.as_str(),
             event.precision_session.as_str(),
             event.precision_provider.as_str(),
-            event.precision_account.as_str(),
+            precision_account.as_str(),
             event.raw_event_hash,
             raw_usage_json,
             now().to_rfc3339(),
@@ -2055,8 +2179,8 @@ fn to_sql_error(error: StorageError) -> rusqlite::Error {
 mod tests {
     use chrono::{DateTime, Duration, Utc};
     use tokenbuddy_domain::{
-        AccountRecord, AppKind, AppSettings, CollectionStatus, ImportBatch, ImportCursor,
-        IngestSource, LauncherKind, NormalizedUsage, PrecisionLevel, QuotaSnapshot,
+        AccountActivityWindow, AccountRecord, AppKind, AppSettings, CollectionStatus, ImportBatch,
+        ImportCursor, IngestSource, LauncherKind, NormalizedUsage, PrecisionLevel, QuotaSnapshot,
         SessionProviderAttribution, SessionRecord, SourceRecord, UsageEvent, UsageFilters,
     };
 
@@ -2233,6 +2357,131 @@ mod tests {
         assert_eq!(quota_summary.used_percent, Some(18.75));
         assert_eq!(quota_summary.window_type, "primary_5h");
         assert_eq!(quota_summary.precision, PrecisionLevel::Correlated);
+    }
+
+    fn window(account_id: &str, start: DateTime<Utc>, end: DateTime<Utc>) -> AccountActivityWindow {
+        AccountActivityWindow {
+            account_id: account_id.to_owned(),
+            source_id: "cockpit".to_owned(),
+            app: AppKind::Codex,
+            started_at: start,
+            ended_at: end,
+        }
+    }
+
+    fn cockpit_account(id: &str) -> AccountRecord {
+        AccountRecord {
+            id: id.to_owned(),
+            provider_id: "openai".to_owned(),
+            display_name: Some(format!("{id}@example.com")),
+            account_fingerprint: format!("fingerprint-{id}"),
+            auth_mode: "cockpit".to_owned(),
+            plan: None,
+        }
+    }
+
+    fn event_at(hash: &str, occurred_at: DateTime<Utc>) -> UsageEvent {
+        UsageEvent {
+            occurred_at,
+            ..event(hash, Some(10))
+        }
+    }
+
+    #[test]
+    fn a_launcher_activity_window_attributes_events_by_time_and_refuses_when_ambiguous() {
+        let mut database = Database::open_in_memory().expect("database opens");
+        let base = Utc::now() - Duration::hours(5);
+
+        // Imported before the launcher was ever scanned.
+        database
+            .apply_import_batch(&ImportBatch {
+                source: Some(source()),
+                sessions: vec![session()],
+                usage_events: vec![
+                    event_at("first-account-event", base + Duration::minutes(5)),
+                    event_at("second-account-event", base + Duration::minutes(65)),
+                    event_at("ambiguous-event", base + Duration::minutes(125)),
+                    event_at("outside-any-window-event", base + Duration::minutes(200)),
+                ],
+                ..ImportBatch::default()
+            })
+            .expect("events before the launcher scan");
+
+        let stats = database
+            .apply_import_batch(&ImportBatch {
+                accounts: vec![cockpit_account("account-a"), cockpit_account("account-b")],
+                account_windows: vec![
+                    window("account-a", base, base + Duration::minutes(30)),
+                    window(
+                        "account-b",
+                        base + Duration::minutes(60),
+                        base + Duration::minutes(90),
+                    ),
+                    // Two accounts covering the same instant: the launcher log
+                    // cannot say which one served it.
+                    window(
+                        "account-a",
+                        base + Duration::minutes(120),
+                        base + Duration::minutes(130),
+                    ),
+                    window(
+                        "account-b",
+                        base + Duration::minutes(121),
+                        base + Duration::minutes(129),
+                    ),
+                ],
+                ..ImportBatch::default()
+            })
+            .expect("launcher scan");
+        assert_eq!(stats.attributed_account_events, 2);
+
+        let stored = database
+            .list_usage_events(None, 100, 0)
+            .expect("events")
+            .events;
+        let account_of = |hash: &str| {
+            stored
+                .iter()
+                .find(|event| event.id == hash)
+                .and_then(|event| event.account_id.clone())
+        };
+        assert_eq!(
+            account_of("first-account-event").as_deref(),
+            Some("account-a")
+        );
+        assert_eq!(
+            account_of("second-account-event").as_deref(),
+            Some("account-b")
+        );
+        // Neither event resolves to a real account: they keep the placeholder
+        // bucket a session log always lands in. Overlapping windows must not
+        // pick one of two real accounts, and an instant no window covers has no
+        // launcher evidence at all.
+        for unattributed in ["ambiguous-event", "outside-any-window-event"] {
+            assert_eq!(
+                account_of(unattributed).as_deref(),
+                Some("openai:local"),
+                "{unattributed} must not be attributed to a real account"
+            );
+        }
+
+        // An event imported *after* the windows exist resolves on insert, at
+        // Correlated precision rather than the adapter's Unavailable.
+        database
+            .apply_import_batch(&ImportBatch {
+                usage_events: vec![event_at("later-event", base + Duration::minutes(70))],
+                ..ImportBatch::default()
+            })
+            .expect("later import");
+        let later = database
+            .list_usage_events(None, 100, 0)
+            .expect("events")
+            .events
+            .into_iter()
+            .find(|event| event.id == "later-event")
+            .expect("later event");
+        assert_eq!(later.account_id.as_deref(), Some("account-b"));
+        assert_eq!(later.precision_account, PrecisionLevel::Correlated);
     }
 
     #[test]

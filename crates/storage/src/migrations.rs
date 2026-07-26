@@ -28,6 +28,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "0005_local_fingerprint_salt",
         include_str!("../migrations/0005_local_fingerprint_salt.sql"),
     ),
+    (
+        6,
+        "0006_account_activity_windows",
+        include_str!("../migrations/0006_account_activity_windows.sql"),
+    ),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {
