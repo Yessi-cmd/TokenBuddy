@@ -11,6 +11,8 @@ serde.workspace = true
 thiserror.workspace = true
 tokenbuddy-codex-session = { path = "../adapters/codex-session" }
 tokenbuddy-claude-session = { path = "../adapters/claude-session" }
+tokenbuddy-cc-switch = { path = "../adapters/cc-switch" }
+tokenbuddy-cockpit = { path = "../adapters/cockpit" }
 tokenbuddy-domain.workspace = true
 tokenbuddy-storage.workspace = true
 

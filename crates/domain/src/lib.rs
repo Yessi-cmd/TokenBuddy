@@ -320,6 +320,19 @@ pub struct SourceRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A provider identity supplied by an adapter that knows the real routing (e.g.
+/// CC-Switch), as opposed to one inferred from a model name. Persisted into the
+/// `providers` table so the Providers view shows real names and upstream URLs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderRecord {
+    pub id: String,
+    pub provider_family: String,
+    pub display_name: String,
+    pub upstream_url: Option<String>,
+    pub launcher: Option<LauncherKind>,
+    pub source_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderSummary {
     pub id: String,
@@ -481,6 +494,7 @@ pub trait UsageAdapter: Send + Sync {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ImportBatch {
     pub source: Option<SourceRecord>,
+    pub providers: Vec<ProviderRecord>,
     pub sessions: Vec<SessionRecord>,
     pub usage_events: Vec<UsageEvent>,
     pub cursors: Vec<ImportCursor>,

@@ -20,6 +20,8 @@ tauri-plugin-autostart.workspace = true
 tauri-plugin-single-instance.workspace = true
 tokenbuddy-codex-session = { path = "../../../crates/adapters/codex-session" }
 tokenbuddy-claude-session = { path = "../../../crates/adapters/claude-session" }
+tokenbuddy-cc-switch = { path = "../../../crates/adapters/cc-switch" }
+tokenbuddy-cockpit = { path = "../../../crates/adapters/cockpit" }
 tokenbuddy-core = { path = "../../../crates/core" }
 tokenbuddy-domain.workspace = true
 tokenbuddy-storage.workspace = true

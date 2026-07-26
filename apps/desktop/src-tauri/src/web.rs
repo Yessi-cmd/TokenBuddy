@@ -12,7 +12,9 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use tokenbuddy_cc_switch::CcSwitchAdapter;
 use tokenbuddy_claude_session::ClaudeSessionAdapter;
+use tokenbuddy_cockpit::CockpitAdapter;
 use tokenbuddy_codex_session::CodexSessionAdapter;
 use tokenbuddy_core::Core;
 use tokenbuddy_domain::{AppKind, PrecisionLevel, UsageFilters};
@@ -106,6 +108,8 @@ struct Request {
 struct RescanRequest {
     codex_home: Option<String>,
     claude_home: Option<String>,
+    cc_switch_db: Option<String>,
+    cockpit_db: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +323,48 @@ fn route_request_with_autostart(
             match body {
                 Ok(body) => core
                     .rescan_claude(normalize_path(body.claude_home))
+                    .map_or_else(api_error, |report| json_response(200, &report)),
+                Err(error) => api_error(format!("invalid rescan request: {error}")),
+            }
+        }
+        ("GET", "/api/detect-cc-switch") => {
+            let detection = query_value(query, "cc_switch_db")
+                .filter(|value| !value.trim().is_empty())
+                .map(|path| CcSwitchAdapter::new(path).detect_sync());
+            match detection {
+                Some(Ok(result)) => json_response(200, &result),
+                Some(Err(error)) => api_error(error.to_string()),
+                None => core
+                    .detect_cc_switch_path()
+                    .map_or_else(api_error, |result| json_response(200, &result)),
+            }
+        }
+        ("POST", "/api/rescan-cc-switch") => {
+            let body = serde_json::from_slice::<RescanRequest>(&request.body);
+            match body {
+                Ok(body) => core
+                    .rescan_cc_switch(normalize_path(body.cc_switch_db))
+                    .map_or_else(api_error, |report| json_response(200, &report)),
+                Err(error) => api_error(format!("invalid rescan request: {error}")),
+            }
+        }
+        ("GET", "/api/detect-cockpit") => {
+            let detection = query_value(query, "cockpit_db")
+                .filter(|value| !value.trim().is_empty())
+                .map(|path| CockpitAdapter::new(path).detect_sync());
+            match detection {
+                Some(Ok(result)) => json_response(200, &result),
+                Some(Err(error)) => api_error(error.to_string()),
+                None => core
+                    .detect_cockpit_path()
+                    .map_or_else(api_error, |result| json_response(200, &result)),
+            }
+        }
+        ("POST", "/api/rescan-cockpit") => {
+            let body = serde_json::from_slice::<RescanRequest>(&request.body);
+            match body {
+                Ok(body) => core
+                    .rescan_cockpit(normalize_path(body.cockpit_db))
                     .map_or_else(api_error, |report| json_response(200, &report)),
                 Err(error) => api_error(format!("invalid rescan request: {error}")),
             }

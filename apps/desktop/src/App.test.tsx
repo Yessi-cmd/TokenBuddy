@@ -18,6 +18,8 @@ import {
 vi.mock("./lib/api", () => ({
   detectClaudePath: vi.fn(),
   detectCodexPath: vi.fn(),
+  detectCcSwitchPath: vi.fn(),
+  detectCockpitPath: vi.fn(),
   getAppSettings: vi.fn(),
   getDashboardSummary: vi.fn(),
   getQuickSummary: vi.fn(),
@@ -30,6 +32,8 @@ vi.mock("./lib/api", () => ({
   openLocalWebApi: vi.fn(),
   rescanClaude: vi.fn(),
   rescanCodex: vi.fn(),
+  rescanCcSwitch: vi.fn(),
+  rescanCockpit: vi.fn(),
   saveExport: vi.fn(),
   showMainWindow: vi.fn(),
   isDesktopRuntime: vi.fn(() => false),
@@ -106,7 +110,7 @@ describe("App", () => {
       screen.getByRole("heading", { name: "TokenBuddy" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "扫描 Codex + Claude" }),
+      screen.getByRole("button", { name: "扫描全部来源" }),
     ).toBeInTheDocument();
     expect(screen.getByText("输入 Token")).toBeInTheDocument();
 

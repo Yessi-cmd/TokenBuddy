@@ -7,9 +7,9 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use thiserror::Error;
 use tokenbuddy_domain::{
     AppKind, AppSettings, CollectionStatus, DashboardSummary, ExportResult, ImportBatch,
-    ImportCursor, LauncherKind, NormalizedUsage, PrecisionLevel, ProviderSummary, QuickSummary,
-    QuotaSnapshot, QuotaSummary, SessionDetail, SessionPage, SessionRecord, SessionSummary,
-    SourceRecord, UsageEvent, UsageEventPage, UsageFilters, UsageTotals,
+    ImportCursor, LauncherKind, NormalizedUsage, PrecisionLevel, ProviderRecord, ProviderSummary,
+    QuickSummary, QuotaSnapshot, QuotaSummary, SessionDetail, SessionPage, SessionRecord,
+    SessionSummary, SourceRecord, UsageEvent, UsageEventPage, UsageFilters, UsageTotals,
 };
 
 pub type Result<T> = std::result::Result<T, StorageError>;
@@ -119,6 +119,10 @@ impl Database {
 
         if let Some(source) = &batch.source {
             upsert_source(&transaction, source)?;
+        }
+
+        for provider in &batch.providers {
+            upsert_provider_record(&transaction, provider)?;
         }
 
         for session in &batch.sessions {
@@ -1067,6 +1071,33 @@ fn upsert_source(conn: &Connection, source: &SourceRecord) -> Result<()> {
     Ok(())
 }
 
+fn upsert_provider_record(conn: &Connection, provider: &ProviderRecord) -> Result<()> {
+    let timestamp = now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO providers (
+             id, provider_family, display_name, upstream_url, launcher,
+             source_id, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+             provider_family = excluded.provider_family,
+             display_name = excluded.display_name,
+             upstream_url = COALESCE(excluded.upstream_url, providers.upstream_url),
+             launcher = COALESCE(excluded.launcher, providers.launcher),
+             source_id = COALESCE(excluded.source_id, providers.source_id),
+             updated_at = excluded.updated_at",
+        params![
+            provider.id,
+            provider.provider_family,
+            provider.display_name,
+            provider.upstream_url,
+            provider.launcher.map(LauncherKind::as_str),
+            provider.source_id,
+            timestamp,
+        ],
+    )?;
+    Ok(())
+}
+
 fn upsert_session(conn: &Connection, session: &SessionRecord) -> Result<()> {
     conn.execute(
         "INSERT INTO sessions (
@@ -1853,6 +1884,7 @@ mod tests {
                 updated_at: now,
             }],
             skipped_records: 0,
+            ..ImportBatch::default()
         };
 
         let first = database.apply_import_batch(&batch).expect("first import");

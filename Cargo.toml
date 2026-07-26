@@ -5,6 +5,8 @@ members = [
     "crates/storage",
     "crates/adapters/codex-session",
     "crates/adapters/claude-session",
+    "crates/adapters/cc-switch",
+    "crates/adapters/cockpit",
     "crates/core",
 ]
 resolver = "3"

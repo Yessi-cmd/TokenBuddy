@@ -3797,11 +3797,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
+name = "tokenbuddy-cc-switch"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokenbuddy-domain",
+]
+
+[[package]]
 name = "tokenbuddy-claude-session"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokenbuddy-domain",
+]
+
+[[package]]
+name = "tokenbuddy-cockpit"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
  "serde_json",
  "sha2",
  "tempfile",
@@ -3831,7 +3857,9 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror 2.0.19",
+ "tokenbuddy-cc-switch",
  "tokenbuddy-claude-session",
+ "tokenbuddy-cockpit",
  "tokenbuddy-codex-session",
  "tokenbuddy-domain",
  "tokenbuddy-storage",
@@ -3849,7 +3877,9 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-single-instance",
  "tempfile",
+ "tokenbuddy-cc-switch",
  "tokenbuddy-claude-session",
+ "tokenbuddy-cockpit",
  "tokenbuddy-codex-session",
  "tokenbuddy-core",
  "tokenbuddy-domain",

@@ -18,7 +18,9 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     window::{Effect, EffectState, EffectsBuilder},
 };
+use tokenbuddy_cc_switch::{CcSwitchAdapter, default_cc_switch_db};
 use tokenbuddy_claude_session::{ClaudeSessionAdapter, default_claude_home};
+use tokenbuddy_cockpit::{CockpitAdapter, default_cockpit_db};
 use tokenbuddy_codex_session::{CodexSessionAdapter, default_codex_home};
 use tokenbuddy_core::{Core, CoreConfig, CoreError, ImportReport};
 use tokenbuddy_domain::{
@@ -237,6 +239,54 @@ fn rescan_claude(
     state
         .core
         .rescan_claude(normalized_path(claude_home))
+        .map_err(core_error)
+}
+
+#[tauri::command]
+fn detect_cc_switch_path(
+    state: State<'_, AppState>,
+    cc_switch_db: Option<String>,
+) -> Result<DetectionResult, String> {
+    if let Some(path) = normalized_path(cc_switch_db) {
+        return CcSwitchAdapter::new(path)
+            .detect_sync()
+            .map_err(|error| error.to_string());
+    }
+    state.core.detect_cc_switch_path().map_err(core_error)
+}
+
+#[tauri::command]
+fn rescan_cc_switch(
+    state: State<'_, AppState>,
+    cc_switch_db: Option<String>,
+) -> Result<ImportReport, String> {
+    state
+        .core
+        .rescan_cc_switch(normalized_path(cc_switch_db))
+        .map_err(core_error)
+}
+
+#[tauri::command]
+fn detect_cockpit_path(
+    state: State<'_, AppState>,
+    cockpit_db: Option<String>,
+) -> Result<DetectionResult, String> {
+    if let Some(path) = normalized_path(cockpit_db) {
+        return CockpitAdapter::new(path)
+            .detect_sync()
+            .map_err(|error| error.to_string());
+    }
+    state.core.detect_cockpit_path().map_err(core_error)
+}
+
+#[tauri::command]
+fn rescan_cockpit(
+    state: State<'_, AppState>,
+    cockpit_db: Option<String>,
+) -> Result<ImportReport, String> {
+    state
+        .core
+        .rescan_cockpit(normalized_path(cockpit_db))
         .map_err(core_error)
 }
 
@@ -668,7 +718,9 @@ pub fn run() {
                 .join("tokenbuddy.sqlite3");
             let core = Core::start(
                 CoreConfig::new(database_path, default_codex_home())
-                    .with_claude_home(default_claude_home()),
+                    .with_claude_home(default_claude_home())
+                    .with_cc_switch_db(default_cc_switch_db())
+                    .with_cockpit_db(default_cockpit_db()),
             )
             .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
             app.manage(AppState {
@@ -753,6 +805,10 @@ pub fn run() {
             rescan_codex,
             detect_claude_path,
             rescan_claude,
+            detect_cc_switch_path,
+            rescan_cc_switch,
+            detect_cockpit_path,
+            rescan_cockpit,
             start_local_web_api,
             stop_local_web_api,
             get_local_web_api_status,

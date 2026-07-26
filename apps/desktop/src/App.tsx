@@ -12,9 +12,13 @@ import {
   listQuotaSnapshots,
   listSessions,
   listSources,
+  detectCcSwitchPath,
+  detectCockpitPath,
   openLocalWebApi,
   rescanClaude,
   rescanCodex,
+  rescanCcSwitch,
+  rescanCockpit,
   saveExport,
   showMainWindow,
   isDesktopRuntime,
@@ -221,10 +225,16 @@ function DashboardView() {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [codexHome, setCodexHome] = useState("");
   const [claudeHome, setClaudeHome] = useState("");
+  const [ccSwitchDb, setCcSwitchDb] = useState("");
+  const [cockpitDb, setCockpitDb] = useState("");
   const [codexDetection, setCodexDetection] = useState<DetectionResult | null>(
     null,
   );
   const [claudeDetection, setClaudeDetection] =
+    useState<DetectionResult | null>(null);
+  const [ccSwitchDetection, setCcSwitchDetection] =
+    useState<DetectionResult | null>(null);
+  const [cockpitDetection, setCockpitDetection] =
     useState<DetectionResult | null>(null);
   const [status, setStatus] = useState("正在连接本地数据层…");
   const [error, setError] = useState<string | null>(null);
@@ -348,20 +358,57 @@ function DashboardView() {
     }
   }
 
+  async function handleDetectCcSwitch() {
+    try {
+      const nextDetection = await detectCcSwitchPath(ccSwitchDb.trim() || null);
+      setCcSwitchDetection(nextDetection);
+      setStatus(
+        nextDetection.detected
+          ? "已检测到 CC-Switch 数据库"
+          : "未检测到 CC-Switch 数据库",
+      );
+      setError(null);
+    } catch (cause) {
+      console.error("检测 CC-Switch 失败", cause);
+      setError(`无法检测 CC-Switch：${describeError(cause)}`);
+    }
+  }
+
+  async function handleDetectCockpit() {
+    try {
+      const nextDetection = await detectCockpitPath(cockpitDb.trim() || null);
+      setCockpitDetection(nextDetection);
+      setStatus(
+        nextDetection.detected
+          ? "已检测到 Cockpit 数据库"
+          : "未检测到 Cockpit 数据库",
+      );
+      setError(null);
+    } catch (cause) {
+      console.error("检测 Cockpit 失败", cause);
+      setError(`无法检测 Cockpit：${describeError(cause)}`);
+    }
+  }
+
   async function handleScan() {
     setIsScanning(true);
     // Scan each source independently so one source failing does not discard the
-    // other's results or get misreported as the wrong source's failure.
-    const [codexOutcome, claudeOutcome] = await Promise.allSettled([
-      rescanCodex(codexHome.trim() || null),
-      rescanClaude(claudeHome.trim() || null),
-    ]);
+    // others' results or get misreported as the wrong source's failure.
+    const [codexOutcome, claudeOutcome, ccSwitchOutcome, cockpitOutcome] =
+      await Promise.allSettled([
+        rescanCodex(codexHome.trim() || null),
+        rescanClaude(claudeHome.trim() || null),
+        rescanCcSwitch(ccSwitchDb.trim() || null),
+        rescanCockpit(cockpitDb.trim() || null),
+      ]);
     let inserted = 0;
     let skipped = 0;
     const problems: string[] = [];
     for (const [label, outcome] of [
       ["Codex", codexOutcome],
       ["Claude", claudeOutcome],
+      ["CC-Switch", ccSwitchOutcome],
+      ["Cockpit", cockpitOutcome],
     ] as const) {
       if (outcome.status === "fulfilled") {
         inserted += outcome.value.inserted_events;
@@ -443,7 +490,7 @@ function DashboardView() {
             onClick={handleScan}
             disabled={isScanning}
           >
-            {isScanning ? "扫描中…" : "扫描 Codex + Claude"}
+            {isScanning ? "扫描中…" : "扫描全部来源"}
           </button>
           <button
             className="quiet-button"
@@ -493,6 +540,34 @@ function DashboardView() {
           >
             检测 Claude
           </button>
+          <label htmlFor="cc-switch-db">CC-Switch DB</label>
+          <input
+            id="cc-switch-db"
+            value={ccSwitchDb}
+            onChange={(event) => setCcSwitchDb(event.target.value)}
+            placeholder="留空使用 ~/.cc-switch/cc-switch.db"
+          />
+          <button
+            className="quiet-button"
+            type="button"
+            onClick={handleDetectCcSwitch}
+          >
+            检测 CC-Switch
+          </button>
+          <label htmlFor="cockpit-db">Cockpit DB</label>
+          <input
+            id="cockpit-db"
+            value={cockpitDb}
+            onChange={(event) => setCockpitDb(event.target.value)}
+            placeholder="留空使用 ~/.antigravity_cockpit"
+          />
+          <button
+            className="quiet-button"
+            type="button"
+            onClick={handleDetectCockpit}
+          >
+            检测 Cockpit
+          </button>
         </div>
         <div className="source-detections">
           {codexDetection ? (
@@ -509,6 +584,24 @@ function DashboardView() {
               }
             >
               Claude {claudeDetection.detected ? "Detected" : "Not found"}
+            </span>
+          ) : null}
+          {ccSwitchDetection ? (
+            <span
+              className={
+                ccSwitchDetection.detected ? "detection ok" : "detection"
+              }
+            >
+              CC-Switch {ccSwitchDetection.detected ? "Detected" : "Not found"}
+            </span>
+          ) : null}
+          {cockpitDetection ? (
+            <span
+              className={
+                cockpitDetection.detected ? "detection ok" : "detection"
+              }
+            >
+              Cockpit {cockpitDetection.detected ? "Detected" : "Not found"}
             </span>
           ) : null}
         </div>

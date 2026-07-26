@@ -18,9 +18,17 @@ use std::{
 use chrono::{DateTime, Local, TimeZone, Utc};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use thiserror::Error;
+use tokenbuddy_cc_switch::{
+    ADAPTER_TYPE as CC_SWITCH_ADAPTER_TYPE, CcSwitchAdapter,
+    DISPLAY_NAME as CC_SWITCH_DISPLAY_NAME, SOURCE_ID as CC_SWITCH_SOURCE_ID,
+};
 use tokenbuddy_claude_session::{
     ADAPTER_TYPE as CLAUDE_ADAPTER_TYPE, ClaudeSessionAdapter, DISPLAY_NAME as CLAUDE_DISPLAY_NAME,
     SOURCE_ID as CLAUDE_SOURCE_ID,
+};
+use tokenbuddy_cockpit::{
+    ADAPTER_TYPE as COCKPIT_ADAPTER_TYPE, CockpitAdapter, DISPLAY_NAME as COCKPIT_DISPLAY_NAME,
+    SOURCE_ID as COCKPIT_SOURCE_ID,
 };
 use tokenbuddy_codex_session::{
     ADAPTER_TYPE as CODEX_ADAPTER_TYPE, CodexSessionAdapter, DISPLAY_NAME as CODEX_DISPLAY_NAME,
@@ -40,6 +48,8 @@ pub struct CoreConfig {
     pub database_path: PathBuf,
     pub codex_home: Option<PathBuf>,
     pub claude_home: Option<PathBuf>,
+    pub cc_switch_db: Option<PathBuf>,
+    pub cockpit_db: Option<PathBuf>,
     pub poll_interval: Duration,
     pub enable_file_watcher: bool,
 }
@@ -50,6 +60,8 @@ impl CoreConfig {
             database_path: database_path.into(),
             codex_home,
             claude_home: None,
+            cc_switch_db: None,
+            cockpit_db: None,
             // Native file notifications are the normal wake-up path. Keep a
             // deliberately infrequent poll as a safety net for filesystems
             // that drop or do not support notifications.
@@ -60,6 +72,16 @@ impl CoreConfig {
 
     pub fn with_claude_home(mut self, claude_home: Option<PathBuf>) -> Self {
         self.claude_home = claude_home;
+        self
+    }
+
+    pub fn with_cc_switch_db(mut self, cc_switch_db: Option<PathBuf>) -> Self {
+        self.cc_switch_db = cc_switch_db;
+        self
+    }
+
+    pub fn with_cockpit_db(mut self, cockpit_db: Option<PathBuf>) -> Self {
+        self.cockpit_db = cockpit_db;
         self
     }
 }
@@ -150,6 +172,8 @@ pub struct Core {
     import_lock: Mutex<()>,
     codex_home: RwLock<Option<PathBuf>>,
     claude_home: RwLock<Option<PathBuf>>,
+    cc_switch_db: RwLock<Option<PathBuf>>,
+    cockpit_db: RwLock<Option<PathBuf>>,
     summary: RwLock<QuickSummary>,
     summary_listeners: Mutex<Vec<SummaryListener>>,
     control: Arc<CoreControl>,
@@ -188,6 +212,16 @@ impl Core {
             .as_deref()
             .map(PathBuf::from)
             .or(config.claude_home);
+        let cc_switch_db = settings
+            .cc_switch_db_path
+            .as_deref()
+            .map(PathBuf::from)
+            .or(config.cc_switch_db);
+        let cockpit_db = settings
+            .cockpit_path
+            .as_deref()
+            .map(PathBuf::from)
+            .or(config.cockpit_db);
         let (signal_sender, signal_receiver) = mpsc::channel();
         let (ready_sender, ready_receiver) = mpsc::channel();
         let control = Arc::new(CoreControl::new(signal_sender));
@@ -196,6 +230,8 @@ impl Core {
             import_lock: Mutex::new(()),
             codex_home: RwLock::new(codex_home),
             claude_home: RwLock::new(claude_home),
+            cc_switch_db: RwLock::new(cc_switch_db),
+            cockpit_db: RwLock::new(cockpit_db),
             summary: RwLock::new(QuickSummary::starting()),
             summary_listeners: Mutex::new(Vec::new()),
             control: Arc::clone(&control),
@@ -265,6 +301,95 @@ impl Core {
         self.refresh_once()
     }
 
+    pub fn rescan_cc_switch(
+        &self,
+        cc_switch_db: Option<PathBuf>,
+    ) -> Result<ImportReport, CoreError> {
+        if let Some(cc_switch_db) = cc_switch_db {
+            self.set_cc_switch_db(Some(cc_switch_db))?;
+        }
+        self.refresh_once()
+    }
+
+    pub fn set_cc_switch_db(&self, cc_switch_db: Option<PathBuf>) -> Result<(), CoreError> {
+        let mut settings = self.get_app_settings()?;
+        settings.cc_switch_db_path = cc_switch_db
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        self.database_lock()?.save_app_settings(&settings)?;
+        *self
+            .cc_switch_db
+            .write()
+            .map_err(|_| CoreError::Lock("CC-Switch database"))? = cc_switch_db;
+        self.control.wake();
+        Ok(())
+    }
+
+    pub fn cc_switch_db(&self) -> Result<Option<PathBuf>, CoreError> {
+        self.cc_switch_db
+            .read()
+            .map(|path| path.clone())
+            .map_err(|_| CoreError::Lock("CC-Switch database"))
+    }
+
+    pub fn detect_cc_switch_path(&self) -> Result<DetectionResult, CoreError> {
+        let Some(db_path) = self.cc_switch_db()? else {
+            return Ok(DetectionResult {
+                source_id: CC_SWITCH_SOURCE_ID.to_owned(),
+                detected: false,
+                path_or_endpoint: None,
+                detected_version: None,
+                message: Some("未配置 CC-Switch 数据库".to_owned()),
+            });
+        };
+        CcSwitchAdapter::new(db_path)
+            .detect_sync()
+            .map_err(|error| CoreError::Adapter(error.to_string()))
+    }
+
+    pub fn rescan_cockpit(&self, cockpit_db: Option<PathBuf>) -> Result<ImportReport, CoreError> {
+        if let Some(cockpit_db) = cockpit_db {
+            self.set_cockpit_db(Some(cockpit_db))?;
+        }
+        self.refresh_once()
+    }
+
+    pub fn set_cockpit_db(&self, cockpit_db: Option<PathBuf>) -> Result<(), CoreError> {
+        let mut settings = self.get_app_settings()?;
+        settings.cockpit_path = cockpit_db
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        self.database_lock()?.save_app_settings(&settings)?;
+        *self
+            .cockpit_db
+            .write()
+            .map_err(|_| CoreError::Lock("Cockpit database"))? = cockpit_db;
+        self.control.wake();
+        Ok(())
+    }
+
+    pub fn cockpit_db(&self) -> Result<Option<PathBuf>, CoreError> {
+        self.cockpit_db
+            .read()
+            .map(|path| path.clone())
+            .map_err(|_| CoreError::Lock("Cockpit database"))
+    }
+
+    pub fn detect_cockpit_path(&self) -> Result<DetectionResult, CoreError> {
+        let Some(db_path) = self.cockpit_db()? else {
+            return Ok(DetectionResult {
+                source_id: COCKPIT_SOURCE_ID.to_owned(),
+                detected: false,
+                path_or_endpoint: None,
+                detected_version: None,
+                message: Some("未配置 Cockpit 数据库".to_owned()),
+            });
+        };
+        CockpitAdapter::new(db_path)
+            .detect_sync()
+            .map_err(|error| CoreError::Adapter(error.to_string()))
+    }
+
     pub fn set_codex_home(&self, codex_home: Option<PathBuf>) -> Result<(), CoreError> {
         let mut settings = self.get_app_settings()?;
         settings.codex_home = codex_home
@@ -327,6 +452,16 @@ impl Core {
             .claude_home
             .write()
             .map_err(|_| CoreError::Lock("Claude Home"))? = settings.claude_home.map(PathBuf::from);
+        *self
+            .cc_switch_db
+            .write()
+            .map_err(|_| CoreError::Lock("CC-Switch database"))? =
+            settings.cc_switch_db_path.map(PathBuf::from);
+        *self
+            .cockpit_db
+            .write()
+            .map_err(|_| CoreError::Lock("Cockpit database"))? =
+            settings.cockpit_path.map(PathBuf::from);
         self.control.wake();
         Ok(())
     }
@@ -524,6 +659,21 @@ impl Core {
                 .push("未配置 Claude Home；Claude 数据源保持 Unavailable".to_owned()),
         }
 
+        // CC-Switch and Cockpit are optional and additive: import each only when
+        // its database is actually present so users without it see no noise.
+        if let Some(db_path) = self.cc_switch_db()? {
+            let adapter = CcSwitchAdapter::new(db_path);
+            if adapter.db_path().is_file() {
+                self.import_cc_switch(adapter, &mut state)?;
+            }
+        }
+        if let Some(db_path) = self.cockpit_db()? {
+            let adapter = CockpitAdapter::new(db_path);
+            if adapter.db_path().is_file() {
+                self.import_cockpit(adapter, &mut state)?;
+            }
+        }
+
         // Enforce the retention window after importing so deleted source files,
         // mis-imports, and stale rows do not accumulate forever.
         {
@@ -586,6 +736,58 @@ impl Core {
                     CLAUDE_ADAPTER_TYPE,
                     CLAUDE_DISPLAY_NAME,
                     claude_home,
+                    message,
+                )
+            }
+        }
+    }
+
+    fn import_cc_switch(
+        &self,
+        adapter: CcSwitchAdapter,
+        state: &mut RefreshState,
+    ) -> Result<(), CoreError> {
+        let db_path = adapter.db_path().to_owned();
+        let cursors = self
+            .database_lock()?
+            .list_import_cursors(CC_SWITCH_SOURCE_ID)?;
+        match adapter.import_history_sync(&cursors) {
+            Ok(batch) => self.apply_batch("CC-Switch", batch, state),
+            Err(error) => {
+                let message = format!("CC-Switch 导入失败：{error}");
+                state.has_error = true;
+                state.warnings.push(message.clone());
+                self.record_source_error(
+                    CC_SWITCH_SOURCE_ID,
+                    CC_SWITCH_ADAPTER_TYPE,
+                    CC_SWITCH_DISPLAY_NAME,
+                    db_path,
+                    message,
+                )
+            }
+        }
+    }
+
+    fn import_cockpit(
+        &self,
+        adapter: CockpitAdapter,
+        state: &mut RefreshState,
+    ) -> Result<(), CoreError> {
+        let db_path = adapter.db_path().to_owned();
+        let cursors = self
+            .database_lock()?
+            .list_import_cursors(COCKPIT_SOURCE_ID)?;
+        match adapter.import_history_sync(&cursors) {
+            Ok(batch) => self.apply_batch("Cockpit", batch, state),
+            Err(error) => {
+                let message = format!("Cockpit 导入失败：{error}");
+                state.has_error = true;
+                state.warnings.push(message.clone());
+                self.record_source_error(
+                    COCKPIT_SOURCE_ID,
+                    COCKPIT_ADAPTER_TYPE,
+                    COCKPIT_DISPLAY_NAME,
+                    db_path,
                     message,
                 )
             }

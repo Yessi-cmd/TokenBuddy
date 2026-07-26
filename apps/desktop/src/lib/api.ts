@@ -439,6 +439,62 @@ export function rescanClaude(claudeHome: string | null): Promise<RescanResult> {
   );
 }
 
+export function detectCcSwitchPath(
+  ccSwitchDb: string | null,
+): Promise<DetectionResult> {
+  return request<DetectionResult>(
+    "detect_cc_switch_path",
+    `/api/detect-cc-switch${queryString({ cc_switch_db: ccSwitchDb })}`,
+    { ccSwitchDb },
+  );
+}
+
+export function rescanCcSwitch(
+  ccSwitchDb: string | null,
+): Promise<RescanResult> {
+  return request<RescanResult>(
+    "rescan_cc_switch",
+    "/api/rescan-cc-switch",
+    {
+      ccSwitchDb,
+    },
+    inTauri()
+      ? undefined
+      : {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cc_switch_db: ccSwitchDb }),
+        },
+  );
+}
+
+export function detectCockpitPath(
+  cockpitDb: string | null,
+): Promise<DetectionResult> {
+  return request<DetectionResult>(
+    "detect_cockpit_path",
+    `/api/detect-cockpit${queryString({ cockpit_db: cockpitDb })}`,
+    { cockpitDb },
+  );
+}
+
+export function rescanCockpit(cockpitDb: string | null): Promise<RescanResult> {
+  return request<RescanResult>(
+    "rescan_cockpit",
+    "/api/rescan-cockpit",
+    {
+      cockpitDb,
+    },
+    inTauri()
+      ? undefined
+      : {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cockpit_db: cockpitDb }),
+        },
+  );
+}
+
 export function startLocalWebApi(): Promise<LocalWebApiStatus> {
   if (!inTauri()) {
     return Promise.resolve({ running: true, url: window.location.origin });
