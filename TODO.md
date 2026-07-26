@@ -9,7 +9,7 @@
 | 行覆盖率（cargo llvm-cov, workspace） | 77.63% → **82.83%** | ≥ 85% |
 | clippy 警告（`-D warnings`） | 0 | 0 |
 | `missing_docs` 待补项 | 436 → **162** | 0 |
-| README 与代码一致 | 否 | 是 |
+| README 与代码一致 | 否 → **是** | 是 |
 
 各文件行覆盖率：`apps/desktop/src-tauri/src/lib.rs` 10.93%、`crates/core` 67.77%、
 `crates/domain` 66.84%、`web.rs` 73.44%、`cc-switch` 84.67%、`cockpit` 85.62%、
@@ -29,9 +29,7 @@
 
 - [x] **H3 · `crates/domain` 补全 274 项文档注释** — 见 DONE.md。已开启 `#![warn(missing_docs)]`。
 
-- [ ] **H4 · README 与当前代码状态对齐**（影响：`README.md`）
-      现有 README 只有先决条件和 6 条命令。缺：产品做什么、四个适配器、Tray-first 运行方式、
-      安装包下载入口、精度分级与缺失值语义、数据存放位置与隐私边界。
+- [x] **H4 · README 与当前代码状态对齐** — 见 DONE.md。
 
 ## 中优先级
 
