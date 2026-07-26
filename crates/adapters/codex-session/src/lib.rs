@@ -187,7 +187,13 @@ impl CodexSessionAdapter {
         };
 
         let mut state = ParseState {
-            current_session_id: None,
+            // Rollout headers appear once at the top of the file; restore the
+            // session identity captured by the previous import so appended
+            // `token_count` rows stay attached to the same session instead of
+            // splitting off under the file-stem fallback.
+            current_session_id: (!cursor_is_stale)
+                .then(|| cursor.and_then(|value| value.last_session_id.clone()))
+                .flatten(),
             last_cumulative_usage: (!cursor_is_stale)
                 .then(|| cursor.and_then(|value| value.last_cumulative_usage.clone()))
                 .flatten(),
@@ -369,6 +375,7 @@ impl CodexSessionAdapter {
             content_hash: current_content_hash,
             last_cumulative_usage: state.last_cumulative_usage,
             snapshot_generation: state.snapshot_generation,
+            last_session_id: state.current_session_id,
             updated_at: now(),
         };
 
@@ -577,6 +584,7 @@ fn read_session_index(
             content_hash: Some(content_hash),
             last_cumulative_usage: None,
             snapshot_generation: 0,
+            last_session_id: None,
             updated_at: now(),
         },
         changed,
@@ -906,18 +914,23 @@ fn event_hash(
     raw_usage_json: &Option<Value>,
     snapshot_generation: Option<i64>,
 ) -> String {
+    // Prefer a stable request/response identity so a `response.completed` row is
+    // counted once regardless of which session identity the parser resolved for
+    // it. Crucially the fallback below no longer folds in `session_id`: the same
+    // physical `token_count` line hashed the same way whether it was first seen
+    // during an incremental tail (file-stem identity) or a later full re-scan
+    // (session_meta identity), which previously let one row be counted twice.
+    let response = context.response_id.as_deref().unwrap_or_default();
+    let request = context.request_id.as_deref().unwrap_or_default();
+    if snapshot_generation.is_none() && !(response.is_empty() && request.is_empty()) {
+        return hash_strings([source_id, "identity", response, request]);
+    }
     let raw_usage = raw_usage_json
         .as_ref()
         .map_or_else(String::new, |value| value.to_string());
-    let identity = context
-        .request_id
-        .as_deref()
-        .or(context.response_id.as_deref());
-    let fallback = format!("{resource_id}:{offset}");
     let parts = [
         source_id.to_owned(),
-        identity.unwrap_or(&fallback).to_owned(),
-        context.session_id.clone().unwrap_or_default(),
+        format!("{resource_id}:{offset}"),
         context
             .timestamp
             .map_or_else(String::new, |value| value.to_rfc3339()),
@@ -1285,5 +1298,59 @@ mod tests {
         let result = adapter.detect_sync().expect("detect");
         assert!(!result.detected);
         assert!(default_codex_home().is_some());
+    }
+
+    #[test]
+    fn incremental_token_count_rows_keep_the_header_session_identity() {
+        use std::io::Write;
+
+        // A real rollout file: the session id lives only in the header
+        // `session_meta` line; the `token_count` rows that follow carry none.
+        let home = tempfile::tempdir().expect("home");
+        let sessions = home.path().join("sessions");
+        fs::create_dir_all(&sessions).expect("sessions directory");
+        let file = sessions.join("rollout.jsonl");
+        fs::write(
+            &file,
+            "{\"type\":\"session_meta\",\"timestamp\":\"2026-07-25T09:00:00Z\",\"payload\":{\"id\":\"real-sess\",\"session_id\":\"real-sess\",\"cwd\":\"/p\",\"model\":\"gpt-5-codex\"}}\n\
+             {\"type\":\"token_count\",\"timestamp\":\"2026-07-25T09:00:01Z\",\"total_token_usage\":{\"input_tokens\":100,\"cached_input_tokens\":20,\"output_tokens\":40,\"total_tokens\":140}}\n",
+        )
+        .expect("write rollout");
+
+        let adapter = CodexSessionAdapter::new(home.path());
+        let first = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("first import");
+        assert_eq!(first.usage_events.len(), 1);
+        let session_id = first.usage_events[0]
+            .session_id
+            .clone()
+            .expect("header session id");
+        let cursors: HashMap<_, _> = first
+            .cursors
+            .iter()
+            .map(|cursor| (cursor.resource_id.clone(), cursor.clone()))
+            .collect();
+
+        // Append another header-less token_count row and import incrementally.
+        let mut appended = fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .expect("open rollout");
+        appended
+            .write_all(b"{\"type\":\"token_count\",\"timestamp\":\"2026-07-25T09:00:02Z\",\"total_token_usage\":{\"input_tokens\":150,\"cached_input_tokens\":30,\"output_tokens\":60,\"total_tokens\":210}}\n")
+            .expect("append token_count");
+        drop(appended);
+
+        let second = adapter
+            .import_history_sync(&cursors)
+            .expect("incremental import");
+        assert_eq!(second.usage_events.len(), 1);
+        // The appended row stays on the SAME session instead of splitting off to
+        // the file-stem fallback identity.
+        assert_eq!(
+            second.usage_events[0].session_id.as_deref(),
+            Some(session_id.as_str())
+        );
     }
 }

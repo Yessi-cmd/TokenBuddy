@@ -13,6 +13,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "0002_app_settings",
         include_str!("../migrations/0002_app_settings.sql"),
     ),
+    (
+        3,
+        "0003_cursor_session_identity",
+        include_str!("../migrations/0003_cursor_session_identity.sql"),
+    ),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {

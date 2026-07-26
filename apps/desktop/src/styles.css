@@ -918,315 +918,250 @@ h3 {
   }
 }
 
-.quick-shell {
+/* Tray Quick panel — styled as a native macOS menu-bar popover. The Tauri
+   window supplies the real translucent material (NSVisualEffectView); these
+   rules provide the menu chrome and a frosted fallback for platforms without
+   native vibrancy. Tokens follow AppKit menu metrics. */
+:root {
+  --menu-fg: #1d1d1f;
+  --menu-fg-secondary: rgba(60, 60, 67, 0.6);
+  --menu-fg-tertiary: rgba(60, 60, 67, 0.45);
+  --menu-hover: rgba(0, 0, 0, 0.07);
+  --menu-separator: rgba(60, 60, 67, 0.16);
+  --menu-surface: rgba(246, 246, 244, 0.72);
+  --menu-accent: #0a84ff;
+}
+
+.menu-shell {
   height: 100vh;
   min-height: 0;
-  max-height: 100vh;
-  padding: 8px;
-  color: #1d1d1f;
-  background: transparent;
+  padding: 0;
   overflow: hidden;
+  background: transparent;
+  -webkit-font-smoothing: antialiased;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui,
+    sans-serif;
 }
 
-.quick-card {
-  position: relative;
-  min-height: calc(100vh - 16px);
-  padding: 16px 16px 24px;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 16px;
-  background: rgba(248, 248, 246, 0.88);
-  box-shadow:
-    0 18px 40px rgba(0, 0, 0, 0.2),
-    inset 0 1px 0 rgba(255, 255, 255, 0.82);
-  backdrop-filter: blur(30px) saturate(150%);
-}
-
-.quick-card::before {
-  position: absolute;
-  top: -5px;
-  left: calc(50% - 5px);
-  width: 10px;
-  height: 10px;
-  border-top: 1px solid rgba(0, 0, 0, 0.12);
-  border-left: 1px solid rgba(0, 0, 0, 0.12);
-  background: rgba(248, 248, 246, 0.94);
-  content: "";
-  transform: rotate(45deg);
-}
-
-.quick-heading {
+.menu-surface {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
+  flex-direction: column;
+  gap: 1px;
+  height: 100vh;
+  padding: 6px 7px 7px;
+  color: var(--menu-fg);
+  background: var(--menu-surface);
+  backdrop-filter: blur(24px) saturate(180%);
+  overflow-y: auto;
 }
 
-.quick-brand {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
-.quick-brand-mark {
-  display: grid;
-  width: 25px;
-  height: 25px;
-  place-items: center;
-  border-radius: 7px;
-  color: #fff;
-  background: #16734f;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
-  font-size: 0.78rem;
-  font-weight: 850;
-}
-
-.quick-heading h1 {
-  margin: 2px 0 0;
-  color: #1d1d1f;
-  font-size: 1.08rem;
-  letter-spacing: -0.035em;
-  line-height: 1;
-}
-
-.quick-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 8px;
-  border: 1px solid rgba(52, 199, 89, 0.22);
-  border-radius: 999px;
-  color: #237a3b;
-  background: rgba(52, 199, 89, 0.1);
-  font-size: 0.63rem;
-  font-weight: 800;
-}
-
-.quick-status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #34c759;
-}
-
-.quick-status.status-error {
-  border-color: rgba(255, 149, 0, 0.28);
-  color: #9a5b00;
-  background: rgba(255, 149, 0, 0.1);
-}
-
-.quick-status.status-error .quick-status-dot {
-  background: #ff9500;
-}
-
-.quick-primary {
-  display: grid;
-  gap: 8px;
-  margin-bottom: 13px;
-  padding: 4px 0 14px;
-  border-bottom: 1px solid rgba(60, 60, 67, 0.18);
-}
-
-.quick-primary-header,
-.quick-session-topline {
+.menu-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  padding: 6px 9px 7px;
 }
 
-.quick-primary-header span,
-.quick-session-title span,
-.quick-metric span {
-  color: #6e6e73;
-  font-size: 0.68rem;
+.menu-title {
+  font-size: 0.95rem;
   font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
-.quick-primary-header small,
-.quick-primary p,
-.quick-session-count {
-  color: #8b8b90;
-  font-size: 0.62rem;
-}
-
-.quick-primary p {
-  margin: 0;
-}
-
-.quick-primary strong {
-  color: #1d1d1f;
-  font-size: 2.72rem;
-  letter-spacing: -0.075em;
-  line-height: 1;
-}
-
-.quick-session {
-  padding: 12px;
-  border: 1px solid rgba(60, 60, 67, 0.16);
-  border-radius: 13px;
-  background: rgba(255, 255, 255, 0.42);
-}
-
-.quick-session-topline {
-  margin-bottom: 10px;
-}
-
-.quick-session-topline > span:first-child {
-  color: #3a3a3c;
-  font-size: 0.72rem;
-  font-weight: 800;
-}
-
-.quick-session-picker {
-  display: grid;
-  grid-template-columns: 1fr 1.65fr;
+.menu-status {
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-  color: #6e6e73;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: #1d7a35;
+  background: rgba(52, 199, 89, 0.16);
   font-size: 0.66rem;
-  font-weight: 700;
+  font-weight: 600;
 }
 
-.quick-select-control {
-  position: relative;
+.menu-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentcolor;
 }
 
-.quick-select-control::after {
-  position: absolute;
-  top: 50%;
-  right: 10px;
-  color: #6e6e73;
-  content: "⌄";
-  pointer-events: none;
-  transform: translateY(-55%);
+.menu-status-error,
+.menu-status-starting {
+  color: #9a5b00;
+  background: rgba(255, 149, 0, 0.18);
 }
 
-.quick-select-control select {
+.menu-status-idle {
+  color: var(--menu-fg-secondary);
+  background: rgba(120, 120, 128, 0.16);
+}
+
+.menu-separator {
+  height: 1px;
+  margin: 4px 9px;
+  background: var(--menu-separator);
+}
+
+.menu-group-title {
+  margin: 3px 0 1px;
+  padding: 0 9px;
+  color: var(--menu-fg-tertiary);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.menu-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  transition: background 0.1s ease;
+}
+
+.menu-row:hover {
+  background: var(--menu-hover);
+}
+
+.menu-row-compact {
+  justify-content: space-between;
+  padding: 3px 9px 3px 43px;
+}
+
+.menu-glyph {
+  display: grid;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 6px;
+  color: #fff;
+}
+
+.menu-glyph-blue {
+  background: linear-gradient(180deg, #3898ff, #0a84ff);
+}
+
+.menu-glyph-mint {
+  background: linear-gradient(180deg, #34c98a, #1aa465);
+}
+
+.menu-glyph-amber {
+  background: linear-gradient(180deg, #ffb340, #ff9500);
+}
+
+.menu-row-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.menu-row-label {
+  overflow: hidden;
+  font-size: 0.82rem;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-row-sub {
+  overflow: hidden;
+  color: var(--menu-fg-secondary);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-row-trailing {
+  flex: none;
+  color: var(--menu-fg-secondary);
+  font-size: 0.78rem;
+}
+
+.menu-hero-value {
+  color: var(--menu-fg);
+  font-size: 1.34rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.menu-value {
+  color: var(--menu-fg);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.menu-row-compact .menu-row-label {
+  color: var(--menu-fg-secondary);
+  font-weight: 400;
+}
+
+.menu-caption {
+  overflow: hidden;
+  margin: 2px 0 0;
+  padding: 0 9px 2px 43px;
+  color: var(--menu-fg-tertiary);
+  font-size: 0.71rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-note {
+  margin: 2px 5px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.menu-note-warning {
+  color: #9a5b00;
+  background: rgba(255, 149, 0, 0.14);
+}
+
+.menu-action {
   width: 100%;
-  padding: 8px 27px 8px 9px;
-  border: 1px solid rgba(60, 60, 67, 0.12);
-  border-radius: 8px;
-  color: #1d1d1f;
-  background: rgba(118, 118, 128, 0.1);
-  cursor: pointer;
-  appearance: none;
-  font-size: 0.68rem;
-  font-weight: 700;
-  outline: none;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--menu-fg);
+  background: transparent;
+  cursor: default;
+  font-size: 0.82rem;
+  font-weight: 400;
+  text-align: left;
+  transition: background 0.1s ease;
 }
 
-.quick-select-control select:focus-visible {
-  outline: 2px solid #007aff;
-  outline-offset: 2px;
+.menu-action:hover {
+  color: #fff;
+  background: var(--menu-accent);
 }
 
-.quick-select-control select:disabled {
-  cursor: not-allowed;
-  opacity: 0.62;
-}
-
-.quick-session-title {
-  display: grid;
-  gap: 4px;
-  margin-top: 14px;
-}
-
-.quick-session-title strong {
-  overflow: hidden;
-  color: #1d1d1f;
-  font-size: 0.98rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quick-model,
-.quick-note {
-  color: #6e6e73;
-  font-size: 0.65rem;
-}
-
-.quick-model {
-  margin-top: 5px;
-}
-
-.quick-project {
-  overflow: hidden;
-  margin-top: 5px;
-  color: #8b8b90;
-  font-size: 0.62rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.quick-metrics {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 13px;
-}
-
-.quick-metric {
-  display: grid;
-  gap: 6px;
-  padding: 9px;
-  border: 1px solid rgba(60, 60, 67, 0.08);
-  border-radius: 9px;
-  background: rgba(118, 118, 128, 0.08);
-}
-
-.quick-metric strong {
-  color: #1d1d1f;
-  font-size: 0.84rem;
-}
-
-.quick-note {
-  margin: 12px 2px 0;
+.menu-action:focus-visible {
+  outline: 2px solid var(--menu-accent);
+  outline-offset: -2px;
 }
 
 @media (prefers-color-scheme: dark) {
-  .quick-card {
-    border-color: rgba(255, 255, 255, 0.14);
-    color: #f5f5f7;
-    background: rgba(38, 38, 40, 0.9);
-    box-shadow:
-      0 18px 40px rgba(0, 0, 0, 0.42),
-      inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  :root {
+    --menu-fg: #f5f5f7;
+    --menu-fg-secondary: rgba(235, 235, 245, 0.6);
+    --menu-fg-tertiary: rgba(235, 235, 245, 0.4);
+    --menu-hover: rgba(255, 255, 255, 0.1);
+    --menu-separator: rgba(255, 255, 255, 0.12);
+    --menu-surface: rgba(38, 38, 40, 0.6);
   }
 
-  .quick-card::before {
-    border-color: rgba(255, 255, 255, 0.14);
-    background: rgba(38, 38, 40, 0.96);
-  }
-
-  .quick-heading h1,
-  .quick-primary strong,
-  .quick-session-title strong,
-  .quick-metric strong,
-  .quick-select-control select {
-    color: #f5f5f7;
-  }
-
-  .quick-primary {
-    border-color: rgba(255, 255, 255, 0.14);
-  }
-
-  .quick-session {
-    border-color: rgba(255, 255, 255, 0.13);
-    background: rgba(255, 255, 255, 0.07);
-  }
-
-  .quick-session-topline > span:first-child {
-    color: #f5f5f7;
-  }
-
-  .quick-select-control select {
-    border-color: rgba(255, 255, 255, 0.12);
-    background: rgba(118, 118, 128, 0.24);
-  }
-
-  .quick-metric {
-    border-color: rgba(255, 255, 255, 0.08);
-    background: rgba(0, 0, 0, 0.18);
+  .menu-status {
+    color: #4ad06f;
   }
 }

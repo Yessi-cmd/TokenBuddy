@@ -411,6 +411,12 @@ pub struct ImportCursor {
     pub content_hash: Option<String>,
     pub last_cumulative_usage: Option<NormalizedUsage>,
     pub snapshot_generation: i64,
+    /// The session identity in force at `byte_offset`. Codex rollout files write
+    /// the session UUID once in the header `session_meta` line; later
+    /// `token_count` rows carry no id. An incremental import that resumes past
+    /// the header must remember this identity, or every appended usage row is
+    /// misattributed to the file-stem fallback and the session splits in two.
+    pub last_session_id: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 

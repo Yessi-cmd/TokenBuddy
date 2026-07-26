@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokenbuddy_claude_session::{
@@ -87,6 +87,7 @@ pub struct ImportReport {
     pub upserted_sessions: u64,
     pub updated_cursors: u64,
     pub skipped_records: usize,
+    pub pruned_events: u64,
     pub warning: Option<String>,
 }
 
@@ -224,8 +225,10 @@ impl Core {
             .lock()
             .map_err(|_| CoreError::Lock("worker"))?
             .replace(worker);
+        // The worker announces readiness before any watcher setup, so this is a
+        // generous ceiling for a loaded machine rather than a tight budget.
         ready_receiver
-            .recv_timeout(Duration::from_secs(1))
+            .recv_timeout(Duration::from_secs(10))
             .map_err(|_| CoreError::WorkerNotReady)?;
         Ok(core)
     }
@@ -392,11 +395,13 @@ impl Core {
         &self,
         mut filters: UsageFilters,
     ) -> Result<DashboardSummary, CoreError> {
-        let now = Utc::now();
-        let period_start = now
+        // Anchor "today" on the local calendar day so the dashboard's default
+        // window matches the tray tooltip and the user's wall clock, not UTC.
+        let period_start = Local::now()
             .date_naive()
             .and_hms_opt(0, 0, 0)
-            .map(|value| DateTime::<Utc>::from_naive_utc_and_offset(value, Utc))
+            .and_then(|naive| Local.from_local_datetime(&naive).earliest())
+            .map(|start| start.with_timezone(&Utc))
             .ok_or_else(|| CoreError::Adapter("无法计算今日统计窗口".to_owned()))?;
         filters.period_start.get_or_insert(period_start);
         filters
@@ -409,12 +414,12 @@ impl Core {
 
     pub fn list_sessions(
         &self,
-        search: Option<&str>,
+        filters: &UsageFilters,
         limit: u64,
         offset: u64,
     ) -> Result<SessionPage, CoreError> {
         self.database_lock()?
-            .list_session_page(search, limit, offset)
+            .list_session_page(filters, limit, offset)
             .map_err(CoreError::from)
     }
 
@@ -517,6 +522,15 @@ impl Core {
             None => state
                 .warnings
                 .push("未配置 Claude Home；Claude 数据源保持 Unavailable".to_owned()),
+        }
+
+        // Enforce the retention window after importing so deleted source files,
+        // mis-imports, and stale rows do not accumulate forever.
+        {
+            let mut database = self.database_lock()?;
+            let retention_days = database.get_app_settings()?.data_retention_days;
+            let outcome = database.enforce_retention(retention_days, Utc::now())?;
+            state.report.pruned_events += outcome.deleted_events;
         }
 
         let warning = (!state.warnings.is_empty()).then(|| state.warnings.join("；"));
@@ -679,7 +693,14 @@ impl Drop for Core {
         if let Ok(worker) = self.worker.get_mut()
             && let Some(worker) = worker.take()
         {
-            let _ = worker.join();
+            // If Core is being dropped *on* its own worker thread (the worker
+            // held the last Arc), joining would be a self-join — a guaranteed
+            // deadlock or panic. request_stop above already told the loop to
+            // exit and the now-zero strong count makes its next weak upgrade
+            // fail, so detaching is safe in that case.
+            if worker.thread().id() != thread::current().id() {
+                let _ = worker.join();
+            }
         }
     }
 }
@@ -699,61 +720,97 @@ fn worker_loop(
         if control.stop.load(Ordering::SeqCst) {
             break;
         }
-        if let Some(core) = weak_core.upgrade() {
-            if enable_file_watcher {
-                let desired_paths = core.watch_paths().unwrap_or_default();
-                if desired_paths != watched_paths {
-                    drop(watchers);
-                    watchers = Vec::new();
-                    for path in &desired_paths {
-                        if let Ok(next_watcher) = create_watcher(&control, path) {
-                            watchers.push(next_watcher);
-                        }
-                    }
-                    watched_paths = desired_paths;
-                }
-            }
 
-            if !ready_sent {
-                let _ = ready_sender.send(());
-                ready_sent = true;
-            }
-
-            let signal = match signal_receiver.recv_timeout(poll_interval) {
-                Ok(signal) => signal,
-                // The timeout is intentional: it is the fallback path for
-                // filesystems that do not deliver native notifications.
-                Err(mpsc::RecvTimeoutError::Timeout) => WorkerSignal::Wake,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        // Refresh watchers while only *briefly* holding a strong reference, then
+        // drop it before blocking on recv below. If the worker held the last Arc
+        // across the wait, dropping it there would run Core::drop on this very
+        // thread and deadlock on a self-join; scoping the strong ref avoids it.
+        if enable_file_watcher {
+            let Some(core) = weak_core.upgrade() else {
+                break;
             };
-            if matches!(signal, WorkerSignal::Stop) || control.stop.load(Ordering::SeqCst) {
-                break;
+            let desired_paths = core.watch_paths().unwrap_or_default();
+            if desired_paths != watched_paths {
+                drop(watchers);
+                watchers = Vec::new();
+                for path in &desired_paths {
+                    if let Ok(next_watcher) = create_watcher(&control, path) {
+                        watchers.push(next_watcher);
+                    }
+                }
+                watched_paths = desired_paths;
             }
-            if matches!(signal, WorkerSignal::FileEvent)
-                && !coalesce_file_events(&signal_receiver, &control)
-            {
-                break;
-            }
-            while signal_receiver.try_recv().is_ok() {}
-            if let Err(error) = core.refresh_once() {
-                let _ = core.refresh_summary(CollectionStatus::Error, Some(error.to_string()));
-            }
-        } else {
+        }
+
+        // Announce readiness only after the first watcher pass so a file event
+        // that arrives right after Core::start returns is not missed. The 10s
+        // start timeout absorbs a slow first registration.
+        if !ready_sent {
+            let _ = ready_sender.send(());
+            ready_sent = true;
+        }
+
+        let signal = match signal_receiver.recv_timeout(poll_interval) {
+            Ok(signal) => signal,
+            // The timeout is intentional: it is the fallback path for
+            // filesystems that do not deliver native notifications.
+            Err(mpsc::RecvTimeoutError::Timeout) => WorkerSignal::Wake,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        if matches!(signal, WorkerSignal::Stop) || control.stop.load(Ordering::SeqCst) {
             break;
+        }
+        if matches!(signal, WorkerSignal::FileEvent)
+            && !coalesce_file_events(&signal_receiver, &control)
+        {
+            break;
+        }
+        while signal_receiver.try_recv().is_ok() {}
+
+        let Some(core) = weak_core.upgrade() else {
+            break;
+        };
+        if let Err(error) = core.refresh_once() {
+            let _ = core.refresh_summary(CollectionStatus::Error, Some(error.to_string()));
         }
     }
 }
 
 fn watch_target(home: &std::path::Path, child: &str) -> Option<PathBuf> {
     let data_dir = home.join(child);
-    if data_dir.exists() {
-        Some(data_dir)
-    } else if home.exists() {
-        Some(home.to_owned())
-    } else {
-        home.parent()
-            .filter(|parent| parent.exists())
-            .map(PathBuf::from)
+    if data_dir.is_dir() {
+        return Some(data_dir);
+    }
+    // The data directory does not exist yet. Watch the (small, app-owned) home
+    // directory so its creation wakes the importer — but never fall back to the
+    // user's entire HOME or a filesystem root. A RecursiveMode::Recursive watch
+    // on those would traverse the whole tree, exhausting inotify handles on
+    // Linux and stalling startup. When home is overbroad or absent, skip the
+    // watch entirely and let the periodic poll pick the directory up once it
+    // appears.
+    if home.is_dir() && !is_overbroad_watch_root(home) {
+        return Some(home.to_owned());
+    }
+    None
+}
+
+fn is_overbroad_watch_root(path: &std::path::Path) -> bool {
+    // A filesystem root has no parent.
+    if path.parent().is_none() {
+        return true;
+    }
+    // A codex/claude home misconfigured to the user's HOME directory itself.
+    home_dir().is_some_and(|home| home == path)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
     }
 }
 

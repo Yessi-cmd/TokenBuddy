@@ -166,7 +166,9 @@ impl ClaudeSessionAdapter {
         };
 
         let mut state = ParseState {
-            current_session_id: None,
+            current_session_id: (!cursor_is_stale)
+                .then(|| cursor.and_then(|value| value.last_session_id.clone()))
+                .flatten(),
             last_cumulative_usage: (!cursor_is_stale)
                 .then(|| cursor.and_then(|value| value.last_cumulative_usage.clone()))
                 .flatten(),
@@ -332,6 +334,7 @@ impl ClaudeSessionAdapter {
             content_hash: current_content_hash,
             last_cumulative_usage: state.last_cumulative_usage,
             snapshot_generation: state.snapshot_generation,
+            last_session_id: state.current_session_id,
             updated_at: now(),
         };
 
@@ -494,17 +497,34 @@ fn parse_record(value: &Value, default_session_id: &str, state: &ParseState) -> 
     )
     .or_else(|| state.current_session_id.clone())
     .or_else(|| Some(default_session_id.to_owned()));
+    // Real Claude Code transcripts mark subagent (sidechain) turns with
+    // `isSidechain: true` and reference the spawning turn via `parentUuid`,
+    // sharing the parent's `sessionId` in the same file. The fabricated
+    // `inherited`/`parentSessionId` fixture fields are kept as fallbacks, but
+    // `isSidechain` is the field that actually exists on disk.
+    let is_sidechain = explicit_bool(value, &["isSidechain", "is_sidechain"]).unwrap_or(false);
+    let parent_session_id = explicit_string(
+        value,
+        &[
+            "parent_session_id",
+            "parentSessionId",
+            "parent_session",
+            "parentSession",
+        ],
+    )
+    .or_else(|| {
+        // A sidechain turn that Claude gives its own sessionId (rather than
+        // sharing the parent's) carries no explicit parent field — attribute it
+        // to the main chain that spawned it, but never make a session its own
+        // parent.
+        is_sidechain
+            .then(|| state.current_session_id.clone())
+            .flatten()
+            .filter(|parent| Some(parent) != session_id.as_ref())
+    });
     let context = ParseContext {
         session_id,
-        parent_session_id: explicit_string(
-            value,
-            &[
-                "parent_session_id",
-                "parentSessionId",
-                "parent_session",
-                "parentSession",
-            ],
-        ),
+        parent_session_id,
         project_path: explicit_string(
             value,
             &["project_path", "projectPath", "cwd", "working_directory"],
@@ -818,19 +838,27 @@ fn event_hash(
     raw_usage_json: &Option<Value>,
     snapshot_generation: Option<i64>,
 ) -> String {
+    // A stable request/response identity is the spec-mandated dedup key (§16.2:
+    // "相同 request/response ID 只保留一次"). Anchoring the hash on it — and
+    // nothing that varies between copies of the same call — makes the same API
+    // response count exactly once even when Claude Code writes it across several
+    // JSONL lines (streamed content blocks) or copies the whole transcript into
+    // a new session file on resume/continue (which rewrites sessionId and
+    // timestamps). Only fall back to a content+position hash when no identity is
+    // present, or for a cumulative-snapshot delta whose generation must stay
+    // distinct.
+    let response = context.response_id.as_deref().unwrap_or_default();
+    let request = context.request_id.as_deref().unwrap_or_default();
+    if snapshot_generation.is_none() && !(response.is_empty() && request.is_empty()) {
+        return hash_strings([SOURCE_ID, "identity", response, request]);
+    }
     let raw_usage = raw_usage_json
         .as_ref()
         .map_or_else(String::new, |value| value.to_string());
-    let identity = context
-        .request_id
-        .as_deref()
-        .or(context.response_id.as_deref());
-    let fallback = format!("{resource_id}:{offset}");
     let parts = [
         SOURCE_ID.to_owned(),
-        identity.unwrap_or(&fallback).to_owned(),
+        format!("{resource_id}:{offset}"),
         context.session_id.clone().unwrap_or_default(),
-        context.parent_session_id.clone().unwrap_or_default(),
         context
             .timestamp
             .map_or_else(String::new, |value| value.to_rfc3339()),
@@ -1120,5 +1148,82 @@ mod tests {
     #[test]
     fn default_home_is_derived_without_reading_the_real_projects_directory() {
         assert!(default_claude_home().is_some());
+    }
+
+    fn write_session(lines: &[&str]) -> TempDir {
+        let home = tempfile::tempdir().expect("home");
+        let project = home.path().join("projects").join("p");
+        fs::create_dir_all(&project).expect("project directory");
+        fs::write(project.join("s.jsonl"), format!("{}\n", lines.join("\n")))
+            .expect("write session");
+        home
+    }
+
+    #[test]
+    fn streamed_response_lines_sharing_a_message_id_collapse_to_one_identity() {
+        // A single API response written across two JSONL lines (streamed content
+        // blocks) with different timestamps — the exact pattern that used to be
+        // double-counted because the hash folded in the timestamp.
+        let home = write_session(&[
+            r#"{"type":"assistant","sessionId":"s","timestamp":"2026-07-25T08:00:01Z","message":{"id":"msg-dup","model":"claude-3-7-sonnet","usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40}}}"#,
+            r#"{"type":"assistant","sessionId":"s","timestamp":"2026-07-25T08:00:09Z","message":{"id":"msg-dup","model":"claude-3-7-sonnet","usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40}}}"#,
+        ]);
+        let batch = ClaudeSessionAdapter::new(home.path())
+            .import_history_sync(&HashMap::new())
+            .expect("import");
+        assert_eq!(batch.usage_events.len(), 2);
+        // Both rows resolve to the same dedup identity, so the UNIQUE
+        // raw_event_hash in storage collapses them to a single counted event.
+        assert_eq!(
+            batch.usage_events[0].raw_event_hash,
+            batch.usage_events[1].raw_event_hash
+        );
+    }
+
+    #[test]
+    fn resume_copy_under_a_new_session_id_does_not_double_count() {
+        // Resume/continue copies a prior response into a new session file with a
+        // rewritten sessionId; the identity hash must ignore sessionId so the
+        // copy dedupes against the original.
+        let original = ClaudeSessionAdapter::new(write_session(&[
+            r#"{"type":"assistant","sessionId":"orig","timestamp":"2026-07-25T08:00:01Z","message":{"id":"msg-1","model":"claude-3-7-sonnet","usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40}}}"#,
+        ]).path())
+        .import_history_sync(&HashMap::new())
+        .expect("original import");
+        let resumed = ClaudeSessionAdapter::new(write_session(&[
+            r#"{"type":"assistant","sessionId":"resumed","timestamp":"2026-07-26T09:00:00Z","message":{"id":"msg-1","model":"claude-3-7-sonnet","usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40}}}"#,
+        ]).path())
+        .import_history_sync(&HashMap::new())
+        .expect("resumed import");
+        assert_eq!(
+            original.usage_events[0].raw_event_hash,
+            resumed.usage_events[0].raw_event_hash
+        );
+    }
+
+    #[test]
+    fn sidechain_turn_without_explicit_parent_is_attributed_to_the_main_chain() {
+        // Real sidechains carry `isSidechain:true` and reference the spawner via
+        // `parentUuid` rather than a `parentSessionId`. When Claude assigns the
+        // subagent its own sessionId, attribute it to the main chain.
+        let home = write_session(&[
+            r#"{"type":"assistant","sessionId":"main","timestamp":"2026-07-25T10:00:00Z","message":{"id":"m1","model":"claude-3-7-sonnet","usage":{"input_tokens":80,"cache_creation_input_tokens":10,"cache_read_input_tokens":5,"output_tokens":20}}}"#,
+            r#"{"type":"assistant","sessionId":"sub","isSidechain":true,"parentUuid":"m1","timestamp":"2026-07-25T10:00:01Z","message":{"id":"m2","model":"claude-3-5-haiku","usage":{"input_tokens":30,"cache_creation_input_tokens":0,"cache_read_input_tokens":4,"output_tokens":12}}}"#,
+        ]);
+        let batch = ClaudeSessionAdapter::new(home.path())
+            .import_history_sync(&HashMap::new())
+            .expect("import");
+        assert_eq!(batch.usage_events.len(), 2);
+        let main = batch
+            .sessions
+            .iter()
+            .find(|session| session.external_session_id.as_deref() == Some("main"))
+            .expect("main session");
+        let sub = batch
+            .sessions
+            .iter()
+            .find(|session| session.external_session_id.as_deref() == Some("sub"))
+            .expect("sub session");
+        assert_eq!(sub.parent_session_id.as_deref(), Some(main.id.as_str()));
     }
 }

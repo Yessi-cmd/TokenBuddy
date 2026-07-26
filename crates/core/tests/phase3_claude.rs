@@ -41,7 +41,9 @@ fn core_imports_claude_events_into_shared_queries_and_summary() {
             .all(|event| event.app == AppKind::ClaudeCode)
     );
     assert_eq!(events.events[0].usage.input_tokens_total, Some(150));
-    assert_eq!(events.events[0].provider_id, None);
+    // Session logs carry no provider, but the model prefix identifies one so the
+    // Providers view reflects real usage instead of staying permanently empty.
+    assert_eq!(events.events[0].provider_id.as_deref(), Some("anthropic"));
     let raw_usage = events.events[0]
         .raw_usage_json
         .as_ref()
@@ -64,6 +66,8 @@ fn core_imports_claude_events_into_shared_queries_and_summary() {
         Some("sanitized-claude-session")
     );
 
+    assert_eq!(summary.provider_name.as_deref(), Some("Anthropic"));
+
     let sources = core.list_sources().expect("sources");
     assert_eq!(
         sources
@@ -72,6 +76,16 @@ fn core_imports_claude_events_into_shared_queries_and_summary() {
             .and_then(|source| source.health_status.as_deref()),
         Some("healthy")
     );
+
+    // The Providers view is populated from the derived provider rather than left
+    // empty as it was before real usage flowed into it.
+    let providers = core.list_providers().expect("providers");
+    let anthropic = providers
+        .iter()
+        .find(|provider| provider.id == "anthropic")
+        .expect("derived Anthropic provider");
+    assert_eq!(anthropic.display_name, "Anthropic");
+    assert_eq!(anthropic.request_count, 2);
     core.shutdown().expect("core stops");
 }
 

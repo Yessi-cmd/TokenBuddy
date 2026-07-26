@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{self, Read, Write},
     net::{Ipv4Addr, Ipv6Addr, TcpListener, TcpStream},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -274,14 +274,13 @@ fn route_request_with_autostart(
             }
         }
         ("GET", "/api/sessions") => {
-            let search = query_value(query, "search");
             let limit = query_value(query, "limit")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(50);
             let offset = query_value(query, "offset")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0);
-            core.list_sessions(search.as_deref(), limit, offset)
+            core.list_sessions(&usage_filters_from_query(query), limit, offset)
                 .map_or_else(api_error, |sessions| json_response(200, &sessions))
         }
         ("GET", "/api/usage-events") => {
@@ -357,23 +356,43 @@ fn route_request_with_autostart(
 
 fn serve_static(root: &Path, path: &str) -> Vec<u8> {
     let decoded = percent_decode(path.trim_start_matches('/'));
-    if decoded.split('/').any(|part| part == "..") {
-        return text_response(404, "not found", "text/plain; charset=utf-8");
-    }
-    let requested = if decoded.is_empty() {
-        root.join("index.html")
-    } else {
-        root.join(&decoded)
-    };
-    let file = if requested.is_file() {
-        requested
-    } else {
-        root.join("index.html")
-    };
+    // Anything that is not a real file inside `root` falls back to the SPA
+    // entry point, exactly as before — but resolution now refuses to escape the
+    // served directory (see resolve_static_file).
+    let file = resolve_static_file(root, &decoded).unwrap_or_else(|| root.join("index.html"));
     match fs::read(&file) {
         Ok(body) => raw_response(200, content_type(&file), &body),
         Err(_) => text_response(404, "web build not found", "text/plain; charset=utf-8"),
     }
+}
+
+/// Resolve a decoded request path to a real file *inside* `root`, or `None` if
+/// it escapes the served directory or does not name a file.
+///
+/// The previous implementation only rejected literal `..` segments, which let a
+/// percent-encoded absolute path (`/%2Fetc%2Fpasswd`) slip through: `Path::join`
+/// silently discards `root` when the joined path is absolute, so the server
+/// happily read arbitrary files off disk. We now require every component to be a
+/// plain name (rejecting root/prefix/`..` components) and then canonicalize and
+/// verify containment, so neither absolute paths nor symlinks can point outside
+/// the build directory.
+fn resolve_static_file(root: &Path, decoded: &str) -> Option<PathBuf> {
+    if decoded.is_empty() {
+        return None;
+    }
+    let relative = Path::new(decoded);
+    let all_plain_names = relative
+        .components()
+        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
+    if !all_plain_names {
+        return None;
+    }
+    let canonical_root = fs::canonicalize(root).ok()?;
+    let canonical_file = fs::canonicalize(canonical_root.join(relative)).ok()?;
+    if !canonical_file.starts_with(&canonical_root) || !canonical_file.is_file() {
+        return None;
+    }
+    Some(canonical_file)
 }
 
 fn json_response<T: Serialize>(status: u16, value: &T) -> Vec<u8> {
@@ -520,7 +539,54 @@ mod tests {
     use tempfile::tempdir;
     use tokenbuddy_core::{Core, CoreConfig};
 
-    use super::{LocalWebServer, percent_decode, query_value};
+    use super::{LocalWebServer, percent_decode, query_value, resolve_static_file, serve_static};
+
+    #[test]
+    fn static_resolution_stays_inside_the_web_root() {
+        let root = tempdir().expect("web root");
+        fs::write(root.path().join("index.html"), b"ok").expect("index");
+        fs::create_dir(root.path().join("assets")).expect("assets dir");
+        fs::write(root.path().join("assets/app.js"), b"//js").expect("asset");
+
+        assert!(resolve_static_file(root.path(), "index.html").is_some());
+        assert!(resolve_static_file(root.path(), "assets/app.js").is_some());
+        // Traversal, absolute paths, and non-files are all refused.
+        assert!(resolve_static_file(root.path(), "../secret").is_none());
+        assert!(resolve_static_file(root.path(), "/etc/passwd").is_none());
+        assert!(resolve_static_file(root.path(), "assets/../../secret").is_none());
+        assert!(resolve_static_file(root.path(), "assets").is_none());
+        assert!(resolve_static_file(root.path(), "").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn percent_encoded_absolute_path_cannot_read_outside_the_web_root() {
+        let root = tempdir().expect("web root");
+        fs::write(root.path().join("index.html"), b"INDEX-FALLBACK").expect("index");
+        let outside = tempdir().expect("outside dir");
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, b"TOP-SECRET").expect("secret");
+
+        // Percent-encode the separators so the naive `..`-only check is bypassed,
+        // exactly like the original `GET /%2Fetc%2Fpasswd` exploit.
+        let encoded: String = secret
+            .to_string_lossy()
+            .chars()
+            .map(|character| {
+                if character == '/' {
+                    "%2F".to_owned()
+                } else {
+                    character.to_string()
+                }
+            })
+            .collect();
+        let response = String::from_utf8_lossy(&serve_static(root.path(), &encoded)).into_owned();
+        assert!(
+            !response.contains("TOP-SECRET"),
+            "static server leaked a file outside the web root"
+        );
+        assert!(response.contains("INDEX-FALLBACK"));
+    }
 
     #[test]
     fn decodes_loopback_api_query_values_without_external_dependencies() {

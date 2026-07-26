@@ -2,7 +2,7 @@ mod migrations;
 
 use std::{collections::HashMap, fmt::Write as FmtWrite, path::Path, time::SystemTime};
 
-use chrono::{DateTime, Datelike, TimeZone, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use thiserror::Error;
 use tokenbuddy_domain::{
@@ -41,6 +41,45 @@ pub struct ImportStats {
     pub upserted_sessions: u64,
     pub updated_cursors: u64,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetentionOutcome {
+    pub deleted_events: u64,
+    pub deleted_sessions: u64,
+    pub deleted_quota: u64,
+}
+
+const SESSION_PAGE_SELECT: &str = "\
+    SELECT s.id, s.external_session_id, s.parent_session_id, s.app, s.launcher,
+           s.project_path, s.title, s.started_at, s.ended_at, s.source_id,
+           s.created_at, s.updated_at,
+           COUNT(u.id),
+           COUNT(u.input_tokens_total), SUM(u.input_tokens_total),
+           COUNT(u.input_tokens_uncached), SUM(u.input_tokens_uncached),
+           COUNT(u.cache_read_tokens), SUM(u.cache_read_tokens),
+           COUNT(u.cache_write_tokens), SUM(u.cache_write_tokens),
+           COUNT(u.output_tokens_total), SUM(u.output_tokens_total),
+           COUNT(u.reasoning_tokens), SUM(u.reasoning_tokens),
+           COUNT(u.visible_output_tokens), SUM(u.visible_output_tokens),
+           COUNT(u.provider_reported_cost), SUM(u.provider_reported_cost),
+           COUNT(u.estimated_cost), SUM(u.estimated_cost)
+    FROM sessions s
+    LEFT JOIN usage_events u ON u.session_id = s.id
+        AND (?1 IS NULL OR u.occurred_at >= ?1)
+        AND (?2 IS NULL OR u.occurred_at < ?2)
+        AND (?3 IS NULL OR u.app = ?3)
+        AND (?4 IS NULL OR u.provider_id = ?4)
+        AND (?5 IS NULL OR u.account_id = ?5)
+        AND (?6 IS NULL OR u.model LIKE ?6)
+        AND (?7 IS NULL OR u.precision_token = ?7)
+    WHERE (?8 IS NULL OR s.project_path LIKE ?8)
+      AND (?9 IS NULL OR s.title LIKE ?9 OR s.project_path LIKE ?9
+           OR s.external_session_id LIKE ?9 OR u.model LIKE ?9
+           OR u.request_id LIKE ?9)
+    GROUP BY s.id
+    HAVING (?10 = 0 OR COUNT(u.id) > 0)
+    ORDER BY COALESCE(s.ended_at, s.updated_at, s.started_at, s.created_at) DESC
+    LIMIT ?11 OFFSET ?12";
 
 pub struct Database {
     connection: Connection,
@@ -87,7 +126,16 @@ impl Database {
         }
 
         for event in &batch.usage_events {
-            let inserted = insert_usage_event(&transaction, event)?;
+            // Derive a provider/account for session-log events that carry no
+            // upstream identity, so the Providers view reflects real usage
+            // instead of staying permanently empty. Events that already name a
+            // provider (e.g. from a proxy source) are respected as-is.
+            let derived = derive_provider(event);
+            if let Some(derived) = &derived {
+                ensure_provider(&transaction, derived, event)?;
+                ensure_account(&transaction, derived)?;
+            }
+            let inserted = insert_usage_event(&transaction, event, derived.as_ref())?;
             if inserted {
                 stats.inserted_events += 1;
             } else {
@@ -101,6 +149,50 @@ impl Database {
 
         transaction.commit()?;
         Ok(stats)
+    }
+
+    /// Delete usage older than the configured retention window and prune the
+    /// sessions and quota snapshots left behind. Returns what was removed. A
+    /// `None` or zero window keeps everything (retention disabled).
+    ///
+    /// This is the only path in TokenBuddy that deletes stored usage: without
+    /// it, deleting a source file, fixing a mis-imported home, or a single bad
+    /// timestamp would pollute every statistic permanently.
+    pub fn enforce_retention(
+        &mut self,
+        retention_days: Option<u32>,
+        now: DateTime<Utc>,
+    ) -> Result<RetentionOutcome> {
+        let Some(days) = retention_days.filter(|days| *days > 0) else {
+            return Ok(RetentionOutcome::default());
+        };
+        let cutoff = (now - chrono::Duration::days(i64::from(days))).to_rfc3339();
+        let transaction = self.connection.transaction()?;
+        let deleted_events = transaction.execute(
+            "DELETE FROM usage_events WHERE occurred_at < ?1",
+            params![cutoff],
+        )? as u64;
+        let deleted_quota = transaction.execute(
+            "DELETE FROM quota_snapshots WHERE captured_at < ?1",
+            params![cutoff],
+        )? as u64;
+        // Prune sessions that have no remaining events and whose last activity is
+        // older than the window. A still-active or newly-created empty session
+        // (recent updated_at) is kept.
+        let deleted_sessions = transaction.execute(
+            "DELETE FROM sessions
+              WHERE updated_at < ?1
+                AND id NOT IN (
+                    SELECT session_id FROM usage_events WHERE session_id IS NOT NULL
+                )",
+            params![cutoff],
+        )? as u64;
+        transaction.commit()?;
+        Ok(RetentionOutcome {
+            deleted_events,
+            deleted_sessions,
+            deleted_quota,
+        })
     }
 
     pub fn list_sources(&self) -> Result<Vec<SourceRecord>> {
@@ -231,7 +323,8 @@ impl Database {
         self.connection
             .query_row(
                 "SELECT source_id, resource_id, file_size, modified_at, byte_offset,
-                        content_hash, last_cumulative_usage, snapshot_generation, updated_at
+                        content_hash, last_cumulative_usage, snapshot_generation,
+                        last_session_id, updated_at
                  FROM import_cursors WHERE source_id = ?1 AND resource_id = ?2",
                 params![source_id, resource_id],
                 cursor_from_row,
@@ -243,7 +336,8 @@ impl Database {
     pub fn list_import_cursors(&self, source_id: &str) -> Result<HashMap<String, ImportCursor>> {
         let mut statement = self.connection.prepare(
             "SELECT source_id, resource_id, file_size, modified_at, byte_offset,
-                    content_hash, last_cumulative_usage, snapshot_generation, updated_at
+                    content_hash, last_cumulative_usage, snapshot_generation,
+                    last_session_id, updated_at
              FROM import_cursors WHERE source_id = ?1",
         )?;
         let rows = statement.query_map(params![source_id], cursor_from_row)?;
@@ -257,48 +351,76 @@ impl Database {
 
     pub fn list_session_page(
         &self,
-        search: Option<&str>,
+        filters: &UsageFilters,
         limit: u64,
         offset: u64,
     ) -> Result<SessionPage> {
-        let search_pattern = search.map(|value| format!("%{}%", value.trim()));
-        let mut statement = self.connection.prepare(
-            "SELECT s.id, s.external_session_id, s.parent_session_id, s.app, s.launcher,
-                    s.project_path, s.title, s.started_at, s.ended_at, s.source_id,
-                    s.created_at, s.updated_at,
-                    COUNT(u.id),
-                    COUNT(u.input_tokens_total), SUM(u.input_tokens_total),
-                    COUNT(u.input_tokens_uncached), SUM(u.input_tokens_uncached),
-                    COUNT(u.cache_read_tokens), SUM(u.cache_read_tokens),
-                    COUNT(u.cache_write_tokens), SUM(u.cache_write_tokens),
-                    COUNT(u.output_tokens_total), SUM(u.output_tokens_total),
-                    COUNT(u.reasoning_tokens), SUM(u.reasoning_tokens),
-                    COUNT(u.visible_output_tokens), SUM(u.visible_output_tokens),
-                    COUNT(u.provider_reported_cost), SUM(u.provider_reported_cost),
-                    COUNT(u.estimated_cost), SUM(u.estimated_cost)
-             FROM sessions s
-             LEFT JOIN usage_events u ON u.session_id = s.id
-             WHERE (?1 IS NULL OR s.title LIKE ?1 OR s.project_path LIKE ?1
-                    OR s.external_session_id LIKE ?1)
-             GROUP BY s.id
-             ORDER BY COALESCE(s.ended_at, s.updated_at, s.started_at, s.created_at) DESC
-             LIMIT ?2 OFFSET ?3",
-        )?;
+        let filter_params = UsageFilterParams::from_filters(filters);
+        // Event-level filters are applied in the JOIN so a session's totals count
+        // only matching events (consistent with the dashboard). When any such
+        // filter is active, only sessions with a matching event are listed.
+        let require_match = i64::from(
+            filter_params.period_start.is_some()
+                || filter_params.period_end.is_some()
+                || filter_params.app.is_some()
+                || filter_params.provider_id.is_some()
+                || filter_params.account_id.is_some()
+                || filter_params.model.is_some()
+                || filter_params.precision.is_some(),
+        );
+        let limit = checked_i64(limit, "limit")?;
+        let offset = checked_i64(offset, "offset")?;
+        let mut statement = self.connection.prepare(SESSION_PAGE_SELECT)?;
         let rows = statement.query_map(
             params![
-                search_pattern,
-                checked_i64(limit, "limit")?,
-                checked_i64(offset, "offset")?
+                filter_params.period_start,
+                filter_params.period_end,
+                filter_params.app,
+                filter_params.provider_id,
+                filter_params.account_id,
+                filter_params.model,
+                filter_params.precision,
+                filter_params.project_path,
+                filter_params.search,
+                require_match,
+                limit,
+                offset,
             ],
             session_summary_from_row,
         )?;
         let sessions = rows.collect::<std::result::Result<Vec<_>, _>>()?;
 
         let total: i64 = self.connection.query_row(
-            "SELECT COUNT(*) FROM sessions
-             WHERE (?1 IS NULL OR title LIKE ?1 OR project_path LIKE ?1
-                    OR external_session_id LIKE ?1)",
-            params![search_pattern],
+            "SELECT COUNT(*) FROM (
+                 SELECT s.id
+                 FROM sessions s
+                 LEFT JOIN usage_events u ON u.session_id = s.id
+                     AND (?1 IS NULL OR u.occurred_at >= ?1)
+                     AND (?2 IS NULL OR u.occurred_at < ?2)
+                     AND (?3 IS NULL OR u.app = ?3)
+                     AND (?4 IS NULL OR u.provider_id = ?4)
+                     AND (?5 IS NULL OR u.account_id = ?5)
+                     AND (?6 IS NULL OR u.model LIKE ?6)
+                     AND (?7 IS NULL OR u.precision_token = ?7)
+                 WHERE (?8 IS NULL OR s.project_path LIKE ?8)
+                   AND (?9 IS NULL OR s.title LIKE ?9 OR s.project_path LIKE ?9
+                        OR s.external_session_id LIKE ?9 OR u.model LIKE ?9
+                        OR u.request_id LIKE ?9)
+                 GROUP BY s.id
+                 HAVING (?10 = 0 OR COUNT(u.id) > 0)
+             )",
+            params![
+                filter_params.period_start,
+                filter_params.period_end,
+                filter_params.app,
+                filter_params.provider_id,
+                filter_params.account_id,
+                filter_params.model,
+                filter_params.precision,
+                filter_params.project_path,
+                filter_params.search,
+                require_match,
+            ],
             |row| row.get(0),
         )?;
 
@@ -553,13 +675,10 @@ impl Database {
         collection_status: CollectionStatus,
         latest_warning: Option<String>,
     ) -> Result<QuickSummary> {
-        let period_start = Utc
-            .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
-            .single()
-            .ok_or_else(|| StorageError::InvalidDateTime {
-                field: "today_start".to_owned(),
-                value: now.to_rfc3339(),
-            })?;
+        let period_start = local_day_start(now).ok_or_else(|| StorageError::InvalidDateTime {
+            field: "today_start".to_owned(),
+            value: now.to_rfc3339(),
+        })?;
         let period_end = period_start + chrono::Duration::days(1);
         let today_total_tokens = self.total_tokens_for_period(period_start, period_end)?;
 
@@ -785,15 +904,28 @@ fn wildcard_filter(value: Option<&str>) -> Option<String> {
 
 fn filter_period(filters: &UsageFilters) -> (DateTime<Utc>, DateTime<Utc>) {
     let now = Utc::now();
-    let default_start = Utc
-        .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
-        .single()
-        .unwrap_or(now);
+    let default_start = local_day_start(now).unwrap_or(now);
     let period_start = filters.period_start.unwrap_or(default_start);
     let period_end = filters
         .period_end
         .unwrap_or_else(|| period_start + chrono::Duration::days(1));
     (period_start, period_end)
+}
+
+/// The UTC instant at which the current local calendar day began. "Today" in
+/// TokenBuddy's tray and dashboard is the user's local day, not a UTC day — an
+/// observability tool that reports "今日 Token" must agree with the wall clock
+/// on the machine it runs on. Uses the earliest valid instant so a daylight-time
+/// gap at local midnight still resolves deterministically.
+fn local_day_start(now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let local_midnight = now
+        .with_timezone(&Local)
+        .date_naive()
+        .and_hms_opt(0, 0, 0)?;
+    Local
+        .from_local_datetime(&local_midnight)
+        .earliest()
+        .map(|start| start.with_timezone(&Utc))
 }
 
 fn export_event_value(event: &UsageEvent) -> serde_json::Value {
@@ -948,8 +1080,18 @@ fn upsert_session(conn: &Connection, session: &SessionRecord) -> Result<()> {
              launcher = COALESCE(excluded.launcher, sessions.launcher),
              project_path = COALESCE(excluded.project_path, sessions.project_path),
              title = COALESCE(excluded.title, sessions.title),
-             started_at = COALESCE(excluded.started_at, sessions.started_at),
-             ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
+             -- Sessions are imported as an incremental tail: each batch only sees
+             -- the events in its own chunk, so a plain COALESCE overwrite would
+             -- drag started_at forward to the newest chunk's first event on every
+             -- poll. Keep the earliest start and the latest end across all chunks.
+             started_at = MIN(
+                 COALESCE(excluded.started_at, sessions.started_at),
+                 COALESCE(sessions.started_at, excluded.started_at)
+             ),
+             ended_at = MAX(
+                 COALESCE(excluded.ended_at, sessions.ended_at),
+                 COALESCE(sessions.ended_at, excluded.ended_at)
+             ),
              source_id = COALESCE(excluded.source_id, sessions.source_id),
              updated_at = excluded.updated_at",
         params![
@@ -970,12 +1112,24 @@ fn upsert_session(conn: &Connection, session: &SessionRecord) -> Result<()> {
     Ok(())
 }
 
-fn insert_usage_event(conn: &Connection, event: &UsageEvent) -> Result<bool> {
+fn insert_usage_event(
+    conn: &Connection,
+    event: &UsageEvent,
+    derived: Option<&DerivedProvider>,
+) -> Result<bool> {
     let raw_usage_json = event
         .raw_usage_json
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
+    let provider_id = event
+        .provider_id
+        .clone()
+        .or_else(|| derived.map(|derived| derived.id.clone()));
+    let account_id = event
+        .account_id
+        .clone()
+        .or_else(|| derived.map(|derived| derived.account_id.clone()));
     let changed = conn.execute(
         "INSERT INTO usage_events (
              id, occurred_at, app, launcher, ingest_source, source_id,
@@ -999,8 +1153,8 @@ fn insert_usage_event(conn: &Connection, event: &UsageEvent) -> Result<bool> {
             event.launcher.as_str(),
             event.ingest_source.as_str(),
             event.source_id,
-            event.provider_id,
-            event.account_id,
+            provider_id,
+            account_id,
             event.session_id,
             event.parent_session_id,
             event.request_id,
@@ -1032,6 +1186,96 @@ fn insert_usage_event(conn: &Connection, event: &UsageEvent) -> Result<bool> {
     Ok(changed == 1)
 }
 
+/// A provider (and grouping account) inferred from a session-log event's model
+/// and app. Session logs do not name a provider, but the model prefix reliably
+/// identifies one, which is enough to populate the Providers view honestly.
+struct DerivedProvider {
+    id: String,
+    family: String,
+    display_name: String,
+    account_id: String,
+    account_name: String,
+}
+
+fn derive_provider(event: &UsageEvent) -> Option<DerivedProvider> {
+    // Respect an identity the adapter already resolved (e.g. a proxy source).
+    if event.provider_id.is_some() {
+        return None;
+    }
+    let (family, display_name) = provider_family(event.model.as_deref(), event.app);
+    Some(DerivedProvider {
+        id: family.to_owned(),
+        family: family.to_owned(),
+        display_name: display_name.to_owned(),
+        account_id: format!("{family}:local"),
+        account_name: "本地会话（来自会话日志）".to_owned(),
+    })
+}
+
+fn provider_family(model: Option<&str>, app: AppKind) -> (&'static str, &'static str) {
+    let model = model.unwrap_or_default().to_ascii_lowercase();
+    let prefix_match = [
+        ("claude", ("anthropic", "Anthropic")),
+        ("gpt", ("openai", "OpenAI")),
+        ("chatgpt", ("openai", "OpenAI")),
+        ("o1", ("openai", "OpenAI")),
+        ("o3", ("openai", "OpenAI")),
+        ("o4", ("openai", "OpenAI")),
+        ("codex", ("openai", "OpenAI")),
+        ("gemini", ("google", "Google")),
+        ("grok", ("xai", "xAI")),
+    ]
+    .into_iter()
+    .find_map(|(prefix, provider)| model.starts_with(prefix).then_some(provider));
+    if let Some(provider) = prefix_match {
+        return provider;
+    }
+    match app {
+        AppKind::Codex => ("openai", "OpenAI"),
+        AppKind::ClaudeCode => ("anthropic", "Anthropic"),
+        AppKind::Unknown => ("unknown", "Unknown"),
+    }
+}
+
+fn ensure_provider(conn: &Connection, derived: &DerivedProvider, event: &UsageEvent) -> Result<()> {
+    let timestamp = now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO providers (
+             id, provider_family, display_name, upstream_url, launcher,
+             source_id, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?6)
+         ON CONFLICT(id) DO NOTHING",
+        params![
+            derived.id,
+            derived.family,
+            derived.display_name,
+            event.launcher.as_str(),
+            event.source_id,
+            timestamp,
+        ],
+    )?;
+    Ok(())
+}
+
+fn ensure_account(conn: &Connection, derived: &DerivedProvider) -> Result<()> {
+    let timestamp = now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO accounts (
+             id, provider_id, display_name, account_fingerprint, auth_mode,
+             plan, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, 'session_log', NULL, ?5, ?5)
+         ON CONFLICT(id) DO NOTHING",
+        params![
+            derived.account_id,
+            derived.id,
+            derived.account_name,
+            derived.account_id,
+            timestamp,
+        ],
+    )?;
+    Ok(())
+}
+
 fn upsert_cursor(conn: &Connection, cursor: &ImportCursor) -> Result<()> {
     let last_cumulative_usage = cursor
         .last_cumulative_usage
@@ -1041,8 +1285,9 @@ fn upsert_cursor(conn: &Connection, cursor: &ImportCursor) -> Result<()> {
     conn.execute(
         "INSERT INTO import_cursors (
              source_id, resource_id, file_size, modified_at, byte_offset,
-             content_hash, last_cumulative_usage, snapshot_generation, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             content_hash, last_cumulative_usage, snapshot_generation,
+             last_session_id, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(source_id, resource_id) DO UPDATE SET
              file_size = excluded.file_size,
              modified_at = excluded.modified_at,
@@ -1050,6 +1295,7 @@ fn upsert_cursor(conn: &Connection, cursor: &ImportCursor) -> Result<()> {
              content_hash = excluded.content_hash,
              last_cumulative_usage = excluded.last_cumulative_usage,
              snapshot_generation = excluded.snapshot_generation,
+             last_session_id = excluded.last_session_id,
              updated_at = excluded.updated_at",
         params![
             cursor.source_id,
@@ -1060,6 +1306,7 @@ fn upsert_cursor(conn: &Connection, cursor: &ImportCursor) -> Result<()> {
             cursor.content_hash,
             last_cumulative_usage,
             cursor.snapshot_generation,
+            cursor.last_session_id,
             cursor.updated_at.to_rfc3339(),
         ],
     )?;
@@ -1263,7 +1510,8 @@ fn cursor_from_row(row: &Row<'_>) -> rusqlite::Result<ImportCursor> {
         content_hash: row.get(5)?,
         last_cumulative_usage,
         snapshot_generation: row.get(7)?,
-        updated_at: parse_datetime("updated_at", row.get(8)?).map_err(to_sql_error)?,
+        last_session_id: row.get(8)?,
+        updated_at: parse_datetime("updated_at", row.get(9)?).map_err(to_sql_error)?,
     })
 }
 
@@ -1490,7 +1738,7 @@ mod tests {
         UsageFilters,
     };
 
-    use super::Database;
+    use super::{Database, RetentionOutcome};
 
     fn source() -> SourceRecord {
         let now = Utc::now();
@@ -1601,6 +1849,7 @@ mod tests {
                 content_hash: Some("hash".to_owned()),
                 last_cumulative_usage: None,
                 snapshot_generation: 0,
+                last_session_id: None,
                 updated_at: now,
             }],
             skipped_records: 0,
@@ -1613,7 +1862,7 @@ mod tests {
         assert_eq!(second.duplicate_events, 2);
 
         let page = database
-            .list_session_page(None, 20, 0)
+            .list_session_page(&UsageFilters::default(), 20, 0)
             .expect("session page");
         assert_eq!(page.total, 1);
         assert_eq!(page.sessions[0].totals.event_count, 2);
@@ -1754,5 +2003,96 @@ mod tests {
             database.get_app_settings().expect("settings load"),
             settings
         );
+    }
+
+    #[test]
+    fn incremental_session_upsert_keeps_earliest_start_and_latest_end() {
+        let mut database = Database::open_in_memory().expect("database opens");
+        let base = Utc::now();
+        let mut early = session();
+        early.started_at = Some(base);
+        early.ended_at = Some(base + Duration::minutes(5));
+        database
+            .apply_import_batch(&ImportBatch {
+                sessions: vec![early],
+                ..ImportBatch::default()
+            })
+            .expect("first chunk");
+
+        // A later incremental chunk only sees its own newer events; a plain
+        // overwrite would drag started_at forward to this chunk's first event.
+        let mut later = session();
+        later.started_at = Some(base + Duration::minutes(10));
+        later.ended_at = Some(base + Duration::minutes(20));
+        database
+            .apply_import_batch(&ImportBatch {
+                sessions: vec![later],
+                ..ImportBatch::default()
+            })
+            .expect("second chunk");
+
+        let page = database
+            .list_session_page(&UsageFilters::default(), 10, 0)
+            .expect("sessions");
+        assert_eq!(page.sessions[0].session.started_at, Some(base));
+        assert_eq!(
+            page.sessions[0].session.ended_at,
+            Some(base + Duration::minutes(20))
+        );
+    }
+
+    #[test]
+    fn retention_prunes_old_usage_and_orphan_sessions() {
+        let mut database = Database::open_in_memory().expect("database opens");
+        let now = Utc::now();
+
+        let mut old_session = session();
+        old_session.id = "old".to_owned();
+        old_session.updated_at = now - Duration::days(40);
+        old_session.ended_at = Some(now - Duration::days(40));
+        let mut old_event = event("old-event", Some(100));
+        old_event.session_id = Some("old".to_owned());
+        old_event.occurred_at = now - Duration::days(40);
+
+        let mut fresh_session = session();
+        fresh_session.id = "fresh".to_owned();
+        let mut fresh_event = event("fresh-event", Some(50));
+        fresh_event.session_id = Some("fresh".to_owned());
+        fresh_event.occurred_at = now;
+
+        database
+            .apply_import_batch(&ImportBatch {
+                sessions: vec![old_session, fresh_session],
+                usage_events: vec![old_event, fresh_event],
+                ..ImportBatch::default()
+            })
+            .expect("seed data");
+
+        // A disabled window keeps everything.
+        assert_eq!(
+            database.enforce_retention(None, now).expect("disabled"),
+            RetentionOutcome::default()
+        );
+        assert_eq!(
+            database
+                .enforce_retention(Some(0), now)
+                .expect("zero window"),
+            RetentionOutcome::default()
+        );
+
+        let outcome = database
+            .enforce_retention(Some(30), now)
+            .expect("enforce retention");
+        assert_eq!(outcome.deleted_events, 1);
+        assert_eq!(outcome.deleted_sessions, 1);
+
+        let events = database.list_usage_events(None, 10, 0).expect("events");
+        assert_eq!(events.total, 1);
+        assert_eq!(events.events[0].id, "fresh-event");
+        let sessions = database
+            .list_session_page(&UsageFilters::default(), 10, 0)
+            .expect("sessions");
+        assert_eq!(sessions.total, 1);
+        assert_eq!(sessions.sessions[0].session.id, "fresh");
     }
 }

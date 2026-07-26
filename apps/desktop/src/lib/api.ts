@@ -291,15 +291,34 @@ export function exportUsage(
 }
 
 export function listSessions(
-  search: string | null = null,
+  filters: UsageFilters = {},
   limit = 50,
   offset = 0,
 ): Promise<SessionPage> {
   return request<SessionPage>(
     "list_sessions",
-    `/api/sessions${queryString({ search, limit, offset })}`,
-    { search, limit, offset },
+    `/api/sessions${queryString({ ...filters, limit, offset })}`,
+    { filters, limit, offset },
   );
+}
+
+// Whether the app is running inside the desktop shell (vs. a plain browser tab).
+export function isDesktopRuntime(): boolean {
+  return inTauri();
+}
+
+// Desktop-only: write the export to disk (WKWebView cannot trigger a blob
+// download reliably) and return the saved path.
+export function saveExport(
+  format: "csv" | "json",
+  filters: UsageFilters = {},
+): Promise<string> {
+  return invoke<string>("save_export", { format, filters });
+}
+
+// Desktop-only: bring the full dashboard window forward.
+export function showMainWindow(): Promise<void> {
+  return invoke<void>("show_main_window");
 }
 
 export function getSessionDetail(

@@ -16,6 +16,7 @@ use tauri::{
     WebviewWindow, WebviewWindowBuilder, WindowEvent,
     menu::{MenuBuilder, MenuEvent},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    window::{Effect, EffectState, EffectsBuilder},
 };
 use tokenbuddy_claude_session::{ClaudeSessionAdapter, default_claude_home};
 use tokenbuddy_codex_session::{CodexSessionAdapter, default_codex_home};
@@ -59,13 +60,17 @@ fn get_dashboard_summary(
 #[tauri::command]
 fn list_sessions(
     state: State<'_, AppState>,
-    search: Option<String>,
+    filters: Option<UsageFilters>,
     limit: Option<u64>,
     offset: Option<u64>,
 ) -> Result<SessionPage, String> {
     state
         .core
-        .list_sessions(search.as_deref(), limit.unwrap_or(50), offset.unwrap_or(0))
+        .list_sessions(
+            &filters.unwrap_or_default(),
+            limit.unwrap_or(50),
+            offset.unwrap_or(0),
+        )
         .map_err(core_error)
 }
 
@@ -155,6 +160,36 @@ fn export_usage(
         .core
         .export_usage(&format, &filters.unwrap_or_default())
         .map_err(core_error)
+}
+
+#[tauri::command]
+fn save_export(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    format: String,
+    filters: Option<UsageFilters>,
+) -> Result<String, String> {
+    // WKWebView cannot reliably trigger a blob download, so the desktop app
+    // writes the export to disk itself and returns the saved path.
+    let export = state
+        .core
+        .export_usage(&format, &filters.unwrap_or_default())
+        .map_err(core_error)?;
+    let directory = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().document_dir())
+        .map_err(|error| format!("无法定位保存目录：{error}"))?;
+    std::fs::create_dir_all(&directory).map_err(|error| format!("无法创建保存目录：{error}"))?;
+    let path = directory.join(&export.filename);
+    std::fs::write(&path, export.content).map_err(|error| format!("无法写入导出文件：{error}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn show_main_window(app: AppHandle) -> Result<(), String> {
+    show_window(&app, "main");
+    Ok(())
 }
 
 #[tauri::command]
@@ -360,19 +395,40 @@ fn get_or_create_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> Option<W
             .resizable(true)
             .visible(false)
             .build(),
-        "quick" => WebviewWindowBuilder::new(app, "quick", WebviewUrl::App("/quick".into()))
-            .title("TokenBuddy QuickSummary")
-            .inner_size(360.0, 540.0)
-            .min_inner_size(320.0, 540.0)
-            .decorations(false)
-            .resizable(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .visible(false)
-            .build(),
+        "quick" => quick_window_builder(app).build(),
         _ => return None,
     };
     result.ok()
+}
+
+fn quick_window_builder<R: Runtime>(
+    app: &AppHandle<R>,
+) -> WebviewWindowBuilder<'_, R, AppHandle<R>> {
+    let builder = WebviewWindowBuilder::new(app, "quick", WebviewUrl::App("/quick".into()))
+        .title("TokenBuddy QuickSummary")
+        .inner_size(320.0, 500.0)
+        .min_inner_size(300.0, 460.0)
+        .decorations(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .transparent(true)
+        .visible(false);
+    // A translucent system material (NSVisualEffectView on macOS, Acrylic on
+    // Windows) makes the panel read as a native menu-bar popover rather than an
+    // opaque web page. Unsupported platforms fall back to the CSS surface.
+    let effect = if cfg!(target_os = "windows") {
+        Effect::Acrylic
+    } else {
+        Effect::Popover
+    };
+    builder.effects(
+        EffectsBuilder::new()
+            .effect(effect)
+            .state(EffectState::Active)
+            .radius(12.0)
+            .build(),
+    )
 }
 
 fn tray_rect<R: Runtime>(app: &AppHandle<R>) -> Option<Rect> {
@@ -457,7 +513,7 @@ fn position_quick_window<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<
     let anchor_size = anchor.size.to_physical::<u32>(scale_factor);
     let panel_size = window
         .outer_size()
-        .unwrap_or_else(|_| PhysicalSize::new(360, 540));
+        .unwrap_or_else(|_| PhysicalSize::new(320, 500));
     let origin = popover_origin(anchor_position, anchor_size, panel_size);
     let mut x = origin.x;
     let mut y = origin.y;
@@ -683,6 +739,8 @@ pub fn run() {
             get_quick_summary,
             get_dashboard_summary,
             export_usage,
+            save_export,
+            show_main_window,
             list_sessions,
             get_session_detail,
             list_usage_events,

@@ -15,6 +15,9 @@ import {
   openLocalWebApi,
   rescanClaude,
   rescanCodex,
+  saveExport,
+  showMainWindow,
+  isDesktopRuntime,
   updateAppSettings,
   type AppSettings,
   type QuickSummary,
@@ -57,12 +60,32 @@ type DashboardFilterForm = {
   search: string;
 };
 
-function utcDateInput(date = new Date()): string {
-  return date.toISOString().slice(0, 10);
+// The date picker and its filters speak the user's *local* calendar day. A
+// date-only string parsed without a timezone is interpreted as local midnight,
+// so converting through Date yields the correct UTC instant to query — matching
+// the tray/dashboard "今日" boundary the core now computes in local time.
+function localDateInput(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function localDayStartIso(dateString: string): string | null {
+  const start = new Date(`${dateString}T00:00:00`);
+  return Number.isNaN(start.valueOf()) ? null : start.toISOString();
+}
+
+// Turn an unknown thrown value into a message worth showing a user. The backend
+// returns command errors as strings; native/network failures arrive as Error.
+function describeError(cause: unknown): string {
+  if (cause instanceof Error) return cause.message;
+  if (typeof cause === "string" && cause.trim()) return cause;
+  return "未知错误";
 }
 
 function initialDashboardFilterForm(): DashboardFilterForm {
-  const today = utcDateInput();
+  const today = localDateInput();
   return {
     period_start: today,
     period_end: today,
@@ -78,13 +101,13 @@ function initialDashboardFilterForm(): DashboardFilterForm {
 
 function dashboardFilters(form: DashboardFilterForm): UsageFilters {
   const periodStart = form.period_start
-    ? `${form.period_start}T00:00:00.000Z`
+    ? localDayStartIso(form.period_start)
     : null;
   let periodEnd: string | null = null;
   if (form.period_end) {
-    const end = new Date(`${form.period_end}T00:00:00.000Z`);
+    const end = new Date(`${form.period_end}T00:00:00`);
     if (!Number.isNaN(end.valueOf())) {
-      end.setUTCDate(end.getUTCDate() + 1);
+      end.setDate(end.getDate() + 1);
       periodEnd = end.toISOString();
     }
   }
@@ -222,7 +245,9 @@ function DashboardView() {
       try {
         const [nextDashboard, nextSessions, nextSources] = await Promise.all([
           getDashboardSummary(filters),
-          listSessions(filterForm.search.trim() || null),
+          // The session list honors the same filters as the metric cards so the
+          // two halves of the screen always tell the same story.
+          listSessions(filters),
           listSources(),
         ]);
         if (!active) return;
@@ -231,10 +256,16 @@ function DashboardView() {
         setSources(nextSources);
         setStatus("数据已从本地 SQLite 加载");
         setError(null);
-      } catch {
+      } catch (cause) {
         if (!active) return;
-        setStatus("请通过 Tauri 启动以连接本地数据层");
-        setError("浏览器预览没有 Tauri IPC；桌面应用启动后会显示真实数据。");
+        console.error("加载总览失败", cause);
+        if (isDesktopRuntime()) {
+          setStatus("无法读取本地数据层");
+          setError(`读取本地数据层失败：${describeError(cause)}`);
+        } else {
+          setStatus("请通过 Tauri 启动以连接本地数据层");
+          setError("浏览器预览没有 Tauri IPC；桌面应用启动后会显示真实数据。");
+        }
       }
     }
 
@@ -242,7 +273,7 @@ function DashboardView() {
     return () => {
       active = false;
     };
-  }, [filterForm.search, filters, refreshVersion]);
+  }, [filters, refreshVersion]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -264,8 +295,9 @@ function DashboardView() {
       try {
         const nextDetail = await getSessionDetail(sessionId);
         if (active) setDetail(nextDetail);
-      } catch {
-        if (active) setError("无法读取会话详情。");
+      } catch (cause) {
+        console.error("读取会话详情失败", cause);
+        if (active) setError(`无法读取会话详情：${describeError(cause)}`);
       }
     }
 
@@ -294,8 +326,9 @@ function DashboardView() {
           : "未检测到 Codex Session 目录",
       );
       setError(null);
-    } catch {
-      setError("无法检测 Codex Home，请确认桌面应用已启动。");
+    } catch (cause) {
+      console.error("检测 Codex Home 失败", cause);
+      setError(`无法检测 Codex Home：${describeError(cause)}`);
     }
   }
 
@@ -309,28 +342,42 @@ function DashboardView() {
           : "未检测到 Claude Code projects 目录",
       );
       setError(null);
-    } catch {
-      setError("无法检测 Claude Home，请确认桌面应用已启动。");
+    } catch (cause) {
+      console.error("检测 Claude Home 失败", cause);
+      setError(`无法检测 Claude Home：${describeError(cause)}`);
     }
   }
 
   async function handleScan() {
     setIsScanning(true);
-    try {
-      const [codexResult, claudeResult] = await Promise.all([
-        rescanCodex(codexHome.trim() || null),
-        rescanClaude(claudeHome.trim() || null),
-      ]);
-      setStatus(
-        `扫描完成：新增 ${codexResult.inserted_events + claudeResult.inserted_events} 条事件，跳过 ${codexResult.skipped_records + claudeResult.skipped_records} 条记录`,
-      );
-      setError(null);
-      setRefreshVersion((value) => value + 1);
-    } catch {
-      setError("Codex 扫描失败；请检查路径、权限或日志格式。");
-    } finally {
-      setIsScanning(false);
+    // Scan each source independently so one source failing does not discard the
+    // other's results or get misreported as the wrong source's failure.
+    const [codexOutcome, claudeOutcome] = await Promise.allSettled([
+      rescanCodex(codexHome.trim() || null),
+      rescanClaude(claudeHome.trim() || null),
+    ]);
+    let inserted = 0;
+    let skipped = 0;
+    const problems: string[] = [];
+    for (const [label, outcome] of [
+      ["Codex", codexOutcome],
+      ["Claude", claudeOutcome],
+    ] as const) {
+      if (outcome.status === "fulfilled") {
+        inserted += outcome.value.inserted_events;
+        skipped += outcome.value.skipped_records;
+        if (outcome.value.warning) {
+          problems.push(`${label}：${outcome.value.warning}`);
+        }
+      } else {
+        console.error(`${label} 扫描失败`, outcome.reason);
+        problems.push(`${label} 扫描失败：${describeError(outcome.reason)}`);
+      }
     }
+    setStatus(`扫描完成：新增 ${inserted} 条事件，跳过 ${skipped} 条记录`);
+    setError(problems.length ? problems.join("；") : null);
+    setRefreshVersion((value) => value + 1);
+    setIsScanning(false);
   }
 
   async function handleOpenWeb() {
@@ -340,26 +387,35 @@ function DashboardView() {
         result.url ? `本地网页面板已启动：${result.url}` : "本地网页面板已启动",
       );
       setError(null);
-    } catch {
-      setError("无法启动本地网页面板；请先通过 Tauri 桌面应用运行。");
+    } catch (cause) {
+      console.error("启动本地网页面板失败", cause);
+      setError(`无法启动本地网页面板：${describeError(cause)}`);
     }
   }
 
   async function handleExport(format: "csv" | "json") {
     setExportingFormat(format);
     try {
-      const result = await exportUsage(format, filters);
-      const blob = new Blob([result.content], { type: result.mime_type });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = result.filename;
-      link.click();
-      URL.revokeObjectURL(url);
+      if (isDesktopRuntime()) {
+        // WKWebView cannot trigger a blob download, so the desktop app writes
+        // the file itself and tells the user where it landed.
+        const savedPath = await saveExport(format, filters);
+        setStatus(`已导出到 ${savedPath}`);
+      } else {
+        const result = await exportUsage(format, filters);
+        const blob = new Blob([result.content], { type: result.mime_type });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = result.filename;
+        link.click();
+        URL.revokeObjectURL(url);
+        setStatus(`已导出 ${result.filename}`);
+      }
       setError(null);
-      setStatus(`已导出 ${result.filename}`);
-    } catch {
-      setError(`无法导出 ${format.toUpperCase()}；请检查本地数据层。`);
+    } catch (cause) {
+      console.error(`导出 ${format} 失败`, cause);
+      setError(`无法导出 ${format.toUpperCase()}：${describeError(cause)}`);
     } finally {
       setExportingFormat(null);
     }
@@ -939,15 +995,16 @@ function SessionsView() {
 
   useEffect(() => {
     let active = true;
-    void listSessions(null, 100, 0)
+    void listSessions({}, 100, 0)
       .then((page) => {
         if (active) {
           setSessions(page.sessions);
           setError(null);
         }
       })
-      .catch(() => {
-        if (active) setError("无法读取会话列表。");
+      .catch((cause: unknown) => {
+        console.error("读取会话列表失败", cause);
+        if (active) setError(`无法读取会话列表：${describeError(cause)}`);
       });
     return () => {
       active = false;
@@ -1090,8 +1147,9 @@ function SettingsView() {
       setSettings(nextSettings);
       setStatus("设置已保存");
       setError(null);
-    } catch {
-      setError("设置保存失败；请检查路径或 Core 状态。");
+    } catch (cause) {
+      console.error("保存设置失败", cause);
+      setError(`设置保存失败：${describeError(cause)}`);
     } finally {
       setIsSaving(false);
     }
@@ -1239,8 +1297,9 @@ function QuickSummaryView() {
         if (!active) return;
         setSummary(nextSummary);
         setError(null);
-      } catch {
-        if (active) setError("无法读取后台 Core 摘要。");
+      } catch (cause) {
+        console.error("读取 Core 摘要失败", cause);
+        if (active) setError(describeError(cause));
       }
     }
 
@@ -1256,97 +1315,213 @@ function QuickSummaryView() {
     };
   }, []);
 
-  const quotaSummary = summary?.quota_summary;
+  const quota = summary?.quota_summary;
+  const status = summary?.collection_status ?? "starting";
+  const sessionSubtitle =
+    [summary?.active_app, summary?.provider_name, summary?.model]
+      .filter(Boolean)
+      .join(" · ") || "Unavailable";
+  const desktop = isDesktopRuntime();
 
   return (
-    <main className="quick-shell">
-      <section className="quick-card">
-        <div className="quick-heading">
-          <div className="quick-brand">
-            <span className="quick-brand-mark" aria-hidden="true">
-              T
-            </span>
-            <div>
-              <p className="eyebrow">Token usage</p>
-              <h1>TokenBuddy</h1>
-            </div>
-          </div>
-          <span
-            className={`quick-status status-${summary?.collection_status ?? "starting"}`}
-          >
-            <span className="quick-status-dot" aria-hidden="true" />
+    <div className="menu-shell">
+      <div
+        className="menu-surface"
+        role="menu"
+        aria-label="TokenBuddy 快速摘要"
+      >
+        <header className="menu-header">
+          <span className="menu-title">TokenBuddy</span>
+          <span className={`menu-status menu-status-${status}`}>
+            <span className="menu-status-dot" aria-hidden="true" />
             {collectionStatusLabel(summary?.collection_status)}
           </span>
-        </div>
-        {error ? <p className="notice notice-warning">{error}</p> : null}
-        <section className="quick-primary" aria-label="今日 Token">
-          <div className="quick-primary-header">
-            <span>今日 Token</span>
-            <small>本地事件汇总</small>
+        </header>
+
+        {error ? (
+          <div className="menu-note menu-note-warning">
+            无法读取后台 Core：{error}
           </div>
-          <strong>{formatTokens(summary?.today_total_tokens)}</strong>
-          <p>口径：输入 + 输出；未知字段不会折算成 0</p>
-        </section>
-        <section className="quick-session" aria-label="会话摘要">
-          <div className="quick-session-topline">
-            <span>最近活动会话</span>
-            <span className="quick-session-count">
-              {summary?.active_session_id || "Unavailable"}
-            </span>
-          </div>
-          <div className="quick-session-title">
-            <span>标题</span>
-            <strong>{summary?.active_session_title || "Unavailable"}</strong>
-          </div>
-          <div className="quick-model">
-            {summary?.active_app || "Unavailable"} ·{" "}
-            {summary?.provider_name || "Provider Unavailable"} ·{" "}
-            {summary?.model || "Model Unavailable"}
-          </div>
-          <div className="quick-project">
-            项目：{summary?.active_project_path || "Unavailable"}
-          </div>
-          <div className="quick-metrics">
-            <QuickMetric
-              label="输入"
-              value={formatTokens(summary?.session_input_tokens)}
-            />
-            <QuickMetric
-              label="缓存读取"
-              value={formatTokens(summary?.session_cache_read_tokens)}
-            />
-            <QuickMetric
-              label="输出"
-              value={formatTokens(summary?.session_output_tokens)}
-            />
-            <QuickMetric
-              label="缓存命中率"
-              value={formatPercent(summary?.session_cache_hit_rate ?? null)}
-            />
-          </div>
-        </section>
-        {quotaSummary ? (
-          <p className="quick-note">
-            官方额度：{formatPercent(quotaSummary.used_percent)} 已用 ·{" "}
-            {quotaSummary.precision}
-          </p>
-        ) : (
-          <p className="quick-note">官方额度 Unavailable</p>
-        )}
-        {summary?.latest_warning ? (
-          <p className="notice notice-warning">{summary.latest_warning}</p>
         ) : null}
-      </section>
-    </main>
+
+        <MenuSeparator />
+        <MenuGroupTitle>今日</MenuGroupTitle>
+        <MenuRow
+          glyph="chart"
+          tint="blue"
+          label="今日 Token"
+          sublabel="输入 + 输出 · 未知不折算成 0"
+          trailing={
+            <span className="menu-hero-value">
+              {formatTokens(summary?.today_total_tokens)}
+            </span>
+          }
+        />
+
+        <MenuSeparator />
+        <MenuGroupTitle>最近活动会话</MenuGroupTitle>
+        <MenuRow
+          glyph="session"
+          tint="mint"
+          label={summary?.active_session_title || "Unavailable"}
+          sublabel={sessionSubtitle}
+        />
+        <MenuValueRow
+          label="输入"
+          value={formatTokens(summary?.session_input_tokens)}
+        />
+        <MenuValueRow
+          label="缓存读取"
+          value={formatTokens(summary?.session_cache_read_tokens)}
+        />
+        <MenuValueRow
+          label="输出"
+          value={formatTokens(summary?.session_output_tokens)}
+        />
+        <MenuValueRow
+          label="缓存命中率"
+          value={formatPercent(summary?.session_cache_hit_rate ?? null)}
+        />
+        {summary?.active_project_path ? (
+          <p className="menu-caption">项目：{summary.active_project_path}</p>
+        ) : null}
+
+        <MenuSeparator />
+        <MenuGroupTitle>官方额度</MenuGroupTitle>
+        <MenuRow
+          glyph="gauge"
+          tint="amber"
+          label={
+            quota ? `${formatPercent(quota.used_percent)} 已用` : "Unavailable"
+          }
+          sublabel={
+            quota
+              ? `${quota.window_type} · ${quota.precision}`
+              : "未接入额度 API"
+          }
+        />
+
+        {summary?.latest_warning ? (
+          <div className="menu-note menu-note-warning">
+            {summary.latest_warning}
+          </div>
+        ) : null}
+
+        {desktop ? (
+          <>
+            <MenuSeparator />
+            <button
+              className="menu-action"
+              type="button"
+              onClick={() => {
+                void showMainWindow().catch((cause: unknown) =>
+                  console.error("打开完整面板失败", cause),
+                );
+              }}
+            >
+              打开完整面板…
+            </button>
+            <button
+              className="menu-action"
+              type="button"
+              onClick={() => {
+                void openLocalWebApi().catch((cause: unknown) =>
+                  console.error("打开本地网页面板失败", cause),
+                );
+              }}
+            >
+              打开本地网页面板…
+            </button>
+          </>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
-function QuickMetric({ label, value }: { label: string; value: string }) {
+function MenuSeparator() {
+  return <div className="menu-separator" role="separator" />;
+}
+
+function MenuGroupTitle({ children }: { children: string }) {
+  return <p className="menu-group-title">{children}</p>;
+}
+
+function MenuValueRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="quick-metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
+    <div className="menu-row menu-row-compact">
+      <span className="menu-row-label">{label}</span>
+      <span className="menu-value">{value}</span>
     </div>
+  );
+}
+
+type MenuGlyphName = "chart" | "session" | "gauge";
+
+function MenuRow({
+  glyph,
+  tint,
+  label,
+  sublabel,
+  trailing,
+}: {
+  glyph: MenuGlyphName;
+  tint: "blue" | "mint" | "amber";
+  label: string;
+  sublabel?: string;
+  trailing?: ReactNode;
+}) {
+  return (
+    <div className="menu-row">
+      <span className={`menu-glyph menu-glyph-${tint}`} aria-hidden="true">
+        <MenuGlyph name={glyph} />
+      </span>
+      <span className="menu-row-body">
+        <span className="menu-row-label">{label}</span>
+        {sublabel ? <span className="menu-row-sub">{sublabel}</span> : null}
+      </span>
+      {trailing ? <span className="menu-row-trailing">{trailing}</span> : null}
+    </div>
+  );
+}
+
+function MenuGlyph({ name }: { name: MenuGlyphName }) {
+  if (name === "chart") {
+    return (
+      <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+        <path
+          d="M2.5 13.5h11M4.75 11V7.5M8 11V4.5M11.25 11V8.5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+        />
+      </svg>
+    );
+  }
+  if (name === "session") {
+    return (
+      <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+        <path
+          d="M3 3.5h10a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H7l-3 2.4V10.5H3a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1Z"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.4"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+      <path
+        d="M3 12a5 5 0 1 1 10 0M8 8.5l2.6-2.6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 

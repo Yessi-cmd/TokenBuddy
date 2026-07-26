@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import App from "./App";
 import {
@@ -6,10 +6,12 @@ import {
   getDashboardSummary,
   getQuickSummary,
   getSessionDetail,
+  isDesktopRuntime,
   listProviders,
   listQuotaSnapshots,
   listSessions,
   listSources,
+  showMainWindow,
   updateAppSettings,
 } from "./lib/api";
 
@@ -28,6 +30,9 @@ vi.mock("./lib/api", () => ({
   openLocalWebApi: vi.fn(),
   rescanClaude: vi.fn(),
   rescanCodex: vi.fn(),
+  saveExport: vi.fn(),
+  showMainWindow: vi.fn(),
+  isDesktopRuntime: vi.fn(() => false),
   updateAppSettings: vi.fn(),
 }));
 
@@ -156,6 +161,19 @@ describe("App", () => {
     });
     expect(screen.getByText("220")).toBeInTheDocument();
     expect(screen.getByText("70")).toBeInTheDocument();
+  });
+
+  it("exposes desktop-only tray actions that open the full dashboard", async () => {
+    vi.mocked(isDesktopRuntime).mockReturnValue(true);
+    vi.mocked(showMainWindow).mockResolvedValue();
+    window.history.pushState({}, "", "/quick");
+    render(<App />);
+
+    const openButton = await screen.findByRole("button", {
+      name: "打开完整面板…",
+    });
+    fireEvent.click(openButton);
+    expect(showMainWindow).toHaveBeenCalled();
   });
 
   it.each([
