@@ -682,6 +682,52 @@ h3 {
   font-size: 0.74rem;
 }
 
+/* Model x provider breakdown. Wide content scrolls inside its own container so
+   the page body never scrolls horizontally. */
+.table-scroll {
+  overflow-x: auto;
+}
+
+.breakdown-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.breakdown-table th,
+.breakdown-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hairline, rgba(60, 60, 67, 0.14));
+  text-align: left;
+  white-space: nowrap;
+}
+
+.breakdown-table th {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.breakdown-table td:nth-child(n + 4) {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.breakdown-table th:nth-child(n + 4) {
+  text-align: right;
+}
+
+.breakdown-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.breakdown-empty {
+  margin: 0;
+  padding: 18px 4px;
+  color: var(--quiet);
+  font-size: 0.78rem;
+}
+
 .empty-state {
   display: grid;
   place-items: center;

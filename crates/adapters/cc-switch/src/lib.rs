@@ -1,18 +1,23 @@
-//! Read-only CC-Switch adapter.
+//! Read-only CC-Switch adapter — a *provider attribution* source, not a token
+//! source.
 //!
 //! CC-Switch keeps a SQLite database at `~/.cc-switch/cc-switch.db`. TokenBuddy
 //! opens it read-only, probes `sqlite_master` before touching any table, and
 //! maps two things into the shared domain model:
 //!
-//! - `providers` + `provider_endpoints` → real provider names and upstream URLs
-//!   (the Providers view no longer has to guess a provider from a model name).
-//! - `proxy_request_logs` rows that CC-Switch measured *through its own proxy*
-//!   → request-level usage events with real cost, latency, and status.
+//! - `providers` + `provider_endpoints` → real provider names and upstream URLs.
+//! - `proxy_request_logs` → which provider actually served each session.
 //!
-//! Crucially, CC-Switch also re-derives usage from the same `~/.codex` and
-//! `~/.claude` session logs that TokenBuddy imports directly (`data_source` of
-//! `codex_session` / `session_log`). Those rows are skipped so the two paths do
-//! not double-count; only genuinely proxy-measured rows become usage events.
+//! It deliberately emits **no usage events**. CC-Switch proxies the very
+//! requests that Codex/Claude Code also record in their own transcripts, so
+//! importing its rows as events would count the same API call twice (verified on
+//! real data: every proxied session_id resolves to an existing
+//! `~/.claude/projects/*.jsonl` transcript). Spec §6.1 ranks session logs above
+//! proxy logs as the token source, and §10.1 forbids treating CC-Switch as the
+//! sole source — so its unique contribution is telling us *who served the
+//! request*, which a session log never records. That fixes attribution the model
+//! name cannot: `deepseek-v4-pro` reached through a Claude-compatible relay is
+//! DeepSeek, not Anthropic.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -25,9 +30,8 @@ use rusqlite::{Connection, OpenFlags, Row};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokenbuddy_domain::{
-    AppKind, DetectionResult, ImportBatch, ImportCursor, IngestSource, LauncherKind,
-    NormalizedUsage, PrecisionLevel, ProviderRecord, SessionRecord, SourceHealth, SourceRecord,
-    UsageEvent,
+    DetectionResult, ImportBatch, ImportCursor, LauncherKind, ProviderRecord,
+    SessionProviderAttribution, SourceHealth, SourceRecord,
 };
 
 pub const SOURCE_ID: &str = "cc-switch";
@@ -235,99 +239,46 @@ impl CcSwitchAdapter {
 
         let mut statement = connection.prepare(&sql)?;
         let names = column_names(&statement);
-        let mut sessions = BTreeMap::<String, SessionRecord>::new();
         let mut referenced_providers = HashSet::<(String, String)>::new();
+        let mut attributions = BTreeMap::<String, String>::new();
         let mut max_created_at = since;
         let mut skipped = 0_usize;
 
         let mut rows = statement.query([since])?;
         while let Some(row) = rows.next()? {
-            let Some(request_id) = string_col(row, &names, "request_id") else {
-                skipped += 1;
-                continue;
-            };
             let created_at = int_col(row, &names, "created_at").unwrap_or(0);
-            let Some(occurred_at) = epoch_to_utc(created_at) else {
+            if epoch_to_utc(created_at).is_none() {
                 skipped += 1;
                 continue;
-            };
+            }
             max_created_at = max_created_at.max(created_at);
 
             let app_type = string_col(row, &names, "app_type").unwrap_or_default();
-            let app = app_kind(&app_type);
             let provider_key = (
                 string_col(row, &names, "provider_id").unwrap_or_default(),
                 app_type.clone(),
             );
-            referenced_providers.insert(provider_key.clone());
-            let provider_id = provider_domain_id(&provider_key);
 
-            let external_session_id =
-                string_col(row, &names, "session_id").filter(|value| !value.is_empty());
-            let session_id = external_session_id.as_deref().map(session_domain_id);
-            if let (Some(external), Some(id)) = (&external_session_id, &session_id) {
-                upsert_session(&mut sessions, id, external, app, occurred_at);
-            }
-
-            let usage = NormalizedUsage {
-                input_tokens_total: int_col(row, &names, "input_tokens").map(cast_u64),
-                input_tokens_uncached: uncached_input(row, &names),
-                cache_read_tokens: int_col(row, &names, "cache_read_tokens").map(cast_u64),
-                cache_write_tokens: int_col(row, &names, "cache_creation_tokens").map(cast_u64),
-                output_tokens_total: int_col(row, &names, "output_tokens").map(cast_u64),
-                reasoning_tokens: None,
-                visible_output_tokens: None,
+            // Correlate to the session the *native* adapter already imported. The
+            // proxy row's session_id is the Codex/Claude session UUID, so hashing
+            // it the way that adapter does lands the attribution on its events.
+            let Some(external_session_id) =
+                string_col(row, &names, "session_id").filter(|value| !value.is_empty())
+            else {
+                continue;
             };
-            let model = string_col(row, &names, "model")
-                .or_else(|| string_col(row, &names, "request_model"))
-                .filter(|value| !value.is_empty());
-            let status_code = int_col(row, &names, "status_code");
-            let cost =
-                string_col(row, &names, "total_cost_usd").and_then(|value| parse_cost(&value));
-            let latency =
-                int_col(row, &names, "latency_ms").or_else(|| int_col(row, &names, "duration_ms"));
-            // A stable request id makes the hash immune to re-reads.
-            let raw_event_hash = hash_parts([SOURCE_ID, "identity", request_id.as_str()]);
-            let session_present = session_id.is_some();
+            let Some(session_id) = native_session_domain_id(&app_type, &external_session_id) else {
+                continue;
+            };
 
-            batch.usage_events.push(UsageEvent {
-                id: raw_event_hash.clone(),
-                occurred_at,
-                app,
-                launcher: LauncherKind::CCSwitch,
-                ingest_source: IngestSource::Proxy,
-                source_id: SOURCE_ID.to_owned(),
-                provider_id: Some(provider_id),
-                account_id: None,
-                session_id,
-                parent_session_id: None,
-                request_id: Some(request_id),
-                response_id: None,
-                model,
-                query_source: Some("cc_switch_proxy".to_owned()),
-                usage,
-                provider_reported_cost: cost,
-                estimated_cost: None,
-                currency: cost.map(|_| "USD".to_owned()),
-                http_status: status_code,
-                latency_ms: latency,
-                success: status_code.map(|code| (200..400).contains(&code)),
-                // The proxy measured the real request end to end.
-                precision_token: PrecisionLevel::Verified,
-                precision_session: if session_present {
-                    PrecisionLevel::ExactSession
-                } else {
-                    PrecisionLevel::Correlated
-                },
-                precision_provider: PrecisionLevel::Verified,
-                precision_account: PrecisionLevel::Unavailable,
-                raw_event_hash,
-                raw_usage_json: Some(raw_usage_json(row, &names)),
-            });
+            referenced_providers.insert(provider_key.clone());
+            // Last write wins: the provider in force at the end of the window is
+            // the one the session is attributed to.
+            attributions.insert(session_id, provider_domain_id(&provider_key));
         }
 
-        // Emit a provider record for every provider the imported events refer to
-        // so the Providers view resolves real names/URLs (and never a dangling id).
+        // Emit a provider record for every provider referenced by an attribution
+        // so the Providers view resolves real names/URLs (never a dangling id).
         for key in referenced_providers {
             let provider = providers.get(&key);
             batch.providers.push(ProviderRecord {
@@ -342,7 +293,14 @@ impl CcSwitchAdapter {
             });
         }
 
-        batch.sessions.extend(sessions.into_values());
+        for (session_id, provider_id) in attributions {
+            batch.attributions.push(SessionProviderAttribution {
+                session_id,
+                provider_id,
+                account_id: None,
+                source_id: SOURCE_ID.to_owned(),
+            });
+        }
         batch.skipped_records += skipped;
         batch.cursors.push(ImportCursor {
             source_id: SOURCE_ID.to_owned(),
@@ -424,23 +382,6 @@ fn int_col(row: &Row<'_>, names: &HashMap<String, usize>, name: &str) -> Option<
     row.get::<_, Option<i64>>(index).ok().flatten()
 }
 
-fn uncached_input(row: &Row<'_>, names: &HashMap<String, usize>) -> Option<u64> {
-    // CC-Switch's `input_tokens` is the total prompt size; the uncached portion
-    // is the remainder after cache reads, when both are known and consistent.
-    let input = int_col(row, names, "input_tokens")?;
-    let cache_read = int_col(row, names, "cache_read_tokens").unwrap_or(0);
-    (input >= cache_read).then(|| cast_u64(input - cache_read))
-}
-
-fn cast_u64(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or(0)
-}
-
-fn parse_cost(value: &str) -> Option<f64> {
-    let cost = value.trim().parse::<f64>().ok()?;
-    (cost.is_finite() && cost >= 0.0).then_some(cost)
-}
-
 fn epoch_to_utc(value: i64) -> Option<DateTime<Utc>> {
     if value <= 0 {
         return None;
@@ -453,72 +394,22 @@ fn epoch_to_utc(value: i64) -> Option<DateTime<Utc>> {
     }
 }
 
-fn app_kind(app_type: &str) -> AppKind {
-    match app_type {
-        "codex" => AppKind::Codex,
-        "claude" | "claude-desktop" => AppKind::ClaudeCode,
-        _ => AppKind::Unknown,
-    }
-}
-
 fn provider_domain_id(key: &(String, String)) -> String {
     format!("{SOURCE_ID}:{}:{}", key.1, key.0)
 }
 
-fn session_domain_id(external_session_id: &str) -> String {
-    format!("{SOURCE_ID}:{}", short_hash(external_session_id))
-}
-
-fn upsert_session(
-    sessions: &mut BTreeMap<String, SessionRecord>,
-    id: &str,
-    external_session_id: &str,
-    app: AppKind,
-    occurred_at: DateTime<Utc>,
-) {
-    sessions
-        .entry(id.to_owned())
-        .and_modify(|session| {
-            session.started_at = Some(
-                session
-                    .started_at
-                    .map_or(occurred_at, |current| current.min(occurred_at)),
-            );
-            session.ended_at = Some(
-                session
-                    .ended_at
-                    .map_or(occurred_at, |current| current.max(occurred_at)),
-            );
-            session.updated_at = now();
-        })
-        .or_insert_with(|| SessionRecord {
-            id: id.to_owned(),
-            external_session_id: Some(external_session_id.to_owned()),
-            parent_session_id: None,
-            app,
-            launcher: Some(LauncherKind::CCSwitch),
-            project_path: None,
-            title: None,
-            started_at: Some(occurred_at),
-            ended_at: Some(occurred_at),
-            source_id: Some(SOURCE_ID.to_owned()),
-            created_at: now(),
-            updated_at: now(),
-        });
-}
-
-fn raw_usage_json(row: &Row<'_>, names: &HashMap<String, usize>) -> serde_json::Value {
-    // Only non-sensitive accounting fields; never prompts or credentials.
-    serde_json::json!({
-        "input_tokens": int_col(row, names, "input_tokens"),
-        "output_tokens": int_col(row, names, "output_tokens"),
-        "cache_read_tokens": int_col(row, names, "cache_read_tokens"),
-        "cache_creation_tokens": int_col(row, names, "cache_creation_tokens"),
-        "total_cost_usd": string_col(row, names, "total_cost_usd"),
-        "model": string_col(row, names, "model"),
-        "status_code": int_col(row, names, "status_code"),
-        "data_source": "proxy",
-    })
+/// Mint the session id exactly as the native session adapter does, so an
+/// attribution lands on the rows that adapter imported. Both adapters use
+/// `"{SOURCE_ID}:{short_hash(external_session_id)}"`; the app type selects which
+/// source id to use. Returns `None` for app types TokenBuddy has no native
+/// adapter for, since nothing could be attributed.
+fn native_session_domain_id(app_type: &str, external_session_id: &str) -> Option<String> {
+    let source_id = match app_type {
+        "claude" => "claude-code-session",
+        "codex" => "codex-session",
+        _ => return None,
+    };
+    Some(format!("{source_id}:{}", short_hash(external_session_id)))
 }
 
 fn hash_parts<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
@@ -543,7 +434,7 @@ mod tests {
     use std::collections::HashMap;
 
     use rusqlite::Connection;
-    use tokenbuddy_domain::{AppKind, IngestSource, LauncherKind, PrecisionLevel};
+    use tokenbuddy_domain::LauncherKind;
 
     use super::{CcSwitchAdapter, LOGS_RESOURCE_ID};
 
@@ -592,31 +483,40 @@ mod tests {
     }
 
     #[test]
-    fn imports_only_proxy_measured_rows_with_real_provider_context() {
+    fn never_emits_usage_events_so_proxied_calls_are_not_double_counted() {
         let dir = write_fixture(true);
         let adapter = CcSwitchAdapter::new(dir.path().join("cc-switch.db"));
         let batch = adapter
             .import_history_sync(&HashMap::new())
             .expect("import");
 
-        // The codex_session row is skipped to avoid double-counting the native
-        // Codex adapter; only the two proxy rows become events.
-        assert_eq!(batch.usage_events.len(), 2);
-        let event = &batch.usage_events[0];
-        assert_eq!(event.app, AppKind::Codex);
-        assert_eq!(event.launcher, LauncherKind::CCSwitch);
-        assert_eq!(event.ingest_source, IngestSource::Proxy);
-        assert_eq!(event.provider_id.as_deref(), Some("cc-switch:codex:prov-1"));
-        assert_eq!(event.request_id.as_deref(), Some("req-1"));
-        assert_eq!(event.usage.input_tokens_total, Some(1000));
-        assert_eq!(event.usage.cache_read_tokens, Some(300));
-        assert_eq!(event.usage.input_tokens_uncached, Some(700));
-        assert_eq!(event.provider_reported_cost, Some(0.0123));
-        assert_eq!(event.currency.as_deref(), Some("USD"));
-        assert_eq!(event.http_status, Some(200));
-        assert_eq!(event.precision_token, PrecisionLevel::Verified);
+        // The proxied requests are the same API calls the native Codex/Claude
+        // adapters already import from their transcripts. CC-Switch contributes
+        // attribution only — never tokens.
+        assert!(batch.usage_events.is_empty());
+        assert!(batch.sessions.is_empty());
+    }
 
-        // Provider context carries the real name + upstream endpoint URL.
+    #[test]
+    fn attributes_sessions_to_the_real_provider_using_native_session_ids() {
+        let dir = write_fixture(true);
+        let adapter = CcSwitchAdapter::new(dir.path().join("cc-switch.db"));
+        let batch = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("import");
+
+        // Only the proxied session is attributed; the codex_session row is
+        // CC-Switch re-reading a transcript and carries no routing truth.
+        assert_eq!(batch.attributions.len(), 1);
+        let attribution = &batch.attributions[0];
+        assert_eq!(attribution.provider_id, "cc-switch:codex:prov-1");
+        assert_eq!(attribution.source_id, "cc-switch");
+        // The id must match what the native Codex adapter mints for "sess-1".
+        assert_eq!(
+            attribution.session_id,
+            format!("codex-session:{}", super::short_hash("sess-1"))
+        );
+
         let provider = batch
             .providers
             .iter()
@@ -627,11 +527,26 @@ mod tests {
             provider.upstream_url.as_deref(),
             Some("https://api.deepseek.com/anthropic")
         );
-        assert_eq!(batch.sessions.len(), 1);
+        assert_eq!(provider.launcher, Some(LauncherKind::CCSwitch));
     }
 
     #[test]
-    fn incremental_cursor_skips_already_imported_rows() {
+    fn native_session_ids_match_each_adapters_scheme() {
+        assert_eq!(
+            super::native_session_domain_id("claude", "abc").as_deref(),
+            Some(format!("claude-code-session:{}", super::short_hash("abc")).as_str())
+        );
+        assert_eq!(
+            super::native_session_domain_id("codex", "abc").as_deref(),
+            Some(format!("codex-session:{}", super::short_hash("abc")).as_str())
+        );
+        // No native adapter exists for these, so nothing can be attributed.
+        assert!(super::native_session_domain_id("gemini", "abc").is_none());
+        assert!(super::native_session_domain_id("claude-desktop", "abc").is_none());
+    }
+
+    #[test]
+    fn incremental_cursor_advances_past_imported_rows() {
         let dir = write_fixture(true);
         let adapter = CcSwitchAdapter::new(dir.path().join("cc-switch.db"));
         let first = adapter
@@ -645,23 +560,25 @@ mod tests {
         let cursor = cursors.get(LOGS_RESOURCE_ID).expect("logs cursor");
         assert_eq!(cursor.byte_offset, 1785000100);
 
-        // Re-importing from the cursor only revisits the boundary row, which the
-        // request-id hash dedupes downstream.
+        // Re-attributing is idempotent: the attribution upsert is keyed by
+        // session, so revisiting the boundary row changes nothing.
         let second = adapter
             .import_history_sync(&cursors)
             .expect("second import");
-        assert!(second.usage_events.len() <= 1);
+        assert!(second.usage_events.is_empty());
     }
 
     #[test]
-    fn older_schema_without_data_source_imports_every_row() {
+    fn older_schema_without_data_source_still_attributes() {
         let dir = write_fixture(false);
         let adapter = CcSwitchAdapter::new(dir.path().join("cc-switch.db"));
         let batch = adapter
             .import_history_sync(&HashMap::new())
             .expect("import");
-        // Without the data_source column every row predates session ingestion.
-        assert_eq!(batch.usage_events.len(), 3);
+        assert!(batch.usage_events.is_empty());
+        // Without the column every row is treated as proxy-measured, so both
+        // sessions get attributed.
+        assert_eq!(batch.attributions.len(), 2);
     }
 
     #[test]
@@ -671,6 +588,7 @@ mod tests {
             .import_history_sync(&HashMap::new())
             .expect("import");
         assert!(batch.usage_events.is_empty());
+        assert!(batch.attributions.is_empty());
         assert_eq!(
             batch.source.as_ref().unwrap().health_status.as_deref(),
             Some("not_found")
@@ -691,20 +609,19 @@ mod tests {
             .import_history_sync(&HashMap::new())
             .expect("real import");
         println!(
-            "real CC-Switch import: {} proxy events, {} providers, {} sessions, {} skipped",
+            "real CC-Switch import: {} usage events, {} attributions, {} providers, {} skipped",
             batch.usage_events.len(),
+            batch.attributions.len(),
             batch.providers.len(),
-            batch.sessions.len(),
             batch.skipped_records
         );
-        let with_cost = batch
-            .usage_events
-            .iter()
-            .filter(|event| event.provider_reported_cost.is_some())
-            .count();
-        println!("events with provider-reported cost: {with_cost}");
-        assert!(batch.usage_events.iter().all(|event| {
-            event.request_id.is_some() && event.launcher == LauncherKind::CCSwitch
-        }));
+        for attribution in &batch.attributions {
+            println!(
+                "  attribute {} -> {}",
+                attribution.session_id, attribution.provider_id
+            );
+        }
+        // The whole point of the fix: no tokens come from CC-Switch.
+        assert!(batch.usage_events.is_empty());
     }
 }

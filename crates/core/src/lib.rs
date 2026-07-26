@@ -547,6 +547,27 @@ impl Core {
             .map_err(CoreError::from)
     }
 
+    /// Usage grouped by model and serving provider for the same window the
+    /// dashboard is showing.
+    pub fn model_breakdown(
+        &self,
+        mut filters: UsageFilters,
+    ) -> Result<Vec<tokenbuddy_domain::ModelUsage>, CoreError> {
+        let period_start = Local::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|naive| Local.from_local_datetime(&naive).earliest())
+            .map(|start| start.with_timezone(&Utc))
+            .ok_or_else(|| CoreError::Adapter("无法计算今日统计窗口".to_owned()))?;
+        filters.period_start.get_or_insert(period_start);
+        filters
+            .period_end
+            .get_or_insert(period_start + chrono::Duration::days(1));
+        self.database_lock()?
+            .model_breakdown(&filters)
+            .map_err(CoreError::from)
+    }
+
     pub fn list_sessions(
         &self,
         filters: &UsageFilters,

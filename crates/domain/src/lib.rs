@@ -320,6 +320,26 @@ pub struct SourceRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// The real provider/account behind a session, reported by a launcher that owns
+/// the routing (CC-Switch, Cockpit).
+///
+/// Session logs record which model answered but never which upstream served it,
+/// so provider identity would otherwise be guessed from the model name — which
+/// is wrong whenever a relay or aggregator is in front (e.g. `deepseek-v4-pro`
+/// served by DeepSeek but reached through a Claude-compatible endpoint). A
+/// launcher that proxied the request knows the truth and states it here instead
+/// of emitting its own token counts, which would double-count the session log
+/// (spec §6.1 ranks session logs above proxy logs as the token source).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionProviderAttribution {
+    /// The session's domain id as minted by the *native* session adapter, so the
+    /// attribution lands on the same rows that adapter imported.
+    pub session_id: String,
+    pub provider_id: String,
+    pub account_id: Option<String>,
+    pub source_id: String,
+}
+
 /// A provider identity supplied by an adapter that knows the real routing (e.g.
 /// CC-Switch), as opposed to one inferred from a model name. Persisted into the
 /// `providers` table so the Providers view shows real names and upstream URLs.
@@ -495,6 +515,7 @@ pub trait UsageAdapter: Send + Sync {
 pub struct ImportBatch {
     pub source: Option<SourceRecord>,
     pub providers: Vec<ProviderRecord>,
+    pub attributions: Vec<SessionProviderAttribution>,
     pub sessions: Vec<SessionRecord>,
     pub usage_events: Vec<UsageEvent>,
     pub cursors: Vec<ImportCursor>,
@@ -557,6 +578,18 @@ pub struct SessionDetail {
 pub struct DashboardSummary {
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
+    pub totals: UsageTotals,
+}
+
+/// Usage grouped by the model that answered and the provider that served it.
+/// `provider_name` resolves through the providers table so a relay shows its
+/// real name rather than a synthetic id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelUsage {
+    pub model: Option<String>,
+    pub provider_id: Option<String>,
+    pub provider_name: Option<String>,
+    pub app: AppKind,
     pub totals: UsageTotals,
 }
 

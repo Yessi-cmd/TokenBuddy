@@ -5,6 +5,7 @@ import {
   detectClaudePath,
   detectCodexPath,
   getDashboardSummary,
+  getModelBreakdown,
   getQuickSummary,
   getSessionDetail,
   exportUsage,
@@ -27,6 +28,7 @@ import {
   type QuickSummary,
   type DashboardSummary,
   type DetectionResult,
+  type ModelUsage,
   type PrecisionLevel,
   type ProviderSummary,
   type QuotaSnapshot,
@@ -217,6 +219,7 @@ function PageFrame({
 
 function DashboardView() {
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null);
+  const [breakdown, setBreakdown] = useState<ModelUsage[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
@@ -253,15 +256,18 @@ function DashboardView() {
 
     async function loadOverview() {
       try {
-        const [nextDashboard, nextSessions, nextSources] = await Promise.all([
-          getDashboardSummary(filters),
-          // The session list honors the same filters as the metric cards so the
-          // two halves of the screen always tell the same story.
-          listSessions(filters),
-          listSources(),
-        ]);
+        const [nextDashboard, nextBreakdown, nextSessions, nextSources] =
+          await Promise.all([
+            getDashboardSummary(filters),
+            getModelBreakdown(filters),
+            // The session list honors the same filters as the metric cards so
+            // the two halves of the screen always tell the same story.
+            listSessions(filters),
+            listSources(),
+          ]);
         if (!active) return;
         setDashboard(nextDashboard);
+        setBreakdown(nextBreakdown);
         setSessions(nextSessions.sessions);
         setSources(nextSources);
         setStatus("数据已从本地 SQLite 加载");
@@ -793,6 +799,57 @@ function DashboardView() {
         />
         <MetricCard label="事件数" value={formatTokens(totals.event_count)} />
         <MetricCard label="费用" value={formatCost(totals)} tone="ink" />
+      </section>
+
+      <section className="panel" aria-labelledby="breakdown-heading">
+        <div className="panel-heading">
+          <div>
+            <p className="section-kicker" id="breakdown-heading">
+              Model & provider
+            </p>
+            <h2>按模型 / 供应商</h2>
+          </div>
+        </div>
+        {breakdown.length ? (
+          <div className="table-scroll">
+            <table className="breakdown-table">
+              <thead>
+                <tr>
+                  <th scope="col">模型</th>
+                  <th scope="col">供应商</th>
+                  <th scope="col">应用</th>
+                  <th scope="col">输入</th>
+                  <th scope="col">输出</th>
+                  <th scope="col">缓存命中率</th>
+                  <th scope="col">事件</th>
+                  <th scope="col">费用</th>
+                </tr>
+              </thead>
+              <tbody>
+                {breakdown.map((row) => (
+                  <tr
+                    key={`${row.model ?? "-"}|${row.provider_id ?? "-"}|${row.app}`}
+                  >
+                    <td>{row.model || "模型 Unavailable"}</td>
+                    <td>
+                      {row.provider_name ||
+                        row.provider_id ||
+                        "供应商 Unavailable"}
+                    </td>
+                    <td>{row.app}</td>
+                    <td>{formatTokens(row.totals.input_tokens_total)}</td>
+                    <td>{formatTokens(row.totals.output_tokens_total)}</td>
+                    <td>{formatPercent(row.totals.cache_hit_rate_percent)}</td>
+                    <td>{formatTokens(row.totals.event_count)}</td>
+                    <td>{formatCost(row.totals)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="breakdown-empty">当前筛选下没有用量记录。</p>
+        )}
       </section>
 
       <section className="workspace-grid">

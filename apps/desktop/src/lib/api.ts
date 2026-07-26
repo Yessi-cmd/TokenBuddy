@@ -128,6 +128,14 @@ export interface DashboardSummary {
   totals: UsageTotals;
 }
 
+export interface ModelUsage {
+  model: string | null;
+  provider_id: string | null;
+  provider_name: string | null;
+  app: AppKind;
+  totals: UsageTotals;
+}
+
 export interface UsageFilters {
   period_start?: string | null;
   period_end?: string | null;
@@ -268,6 +276,16 @@ export function getDashboardSummary(
   return request<DashboardSummary>(
     "get_dashboard_summary",
     `/api/dashboard-summary${queryString({ ...filters })}`,
+    { filters },
+  );
+}
+
+export function getModelBreakdown(
+  filters: UsageFilters = {},
+): Promise<ModelUsage[]> {
+  return request<ModelUsage[]>(
+    "get_model_breakdown",
+    `/api/model-breakdown${queryString({ ...filters })}`,
     { filters },
   );
 }

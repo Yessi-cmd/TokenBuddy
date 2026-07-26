@@ -4,6 +4,7 @@ import App from "./App";
 import {
   getAppSettings,
   getDashboardSummary,
+  getModelBreakdown,
   getQuickSummary,
   getSessionDetail,
   isDesktopRuntime,
@@ -22,6 +23,7 @@ vi.mock("./lib/api", () => ({
   detectCockpitPath: vi.fn(),
   getAppSettings: vi.fn(),
   getDashboardSummary: vi.fn(),
+  getModelBreakdown: vi.fn(),
   getQuickSummary: vi.fn(),
   getSessionDetail: vi.fn(),
   exportUsage: vi.fn(),
@@ -62,6 +64,7 @@ describe("App", () => {
       period_end: "2026-07-27T00:00:00Z",
       totals,
     });
+    vi.mocked(getModelBreakdown).mockResolvedValue([]);
     vi.mocked(listSessions).mockResolvedValue({ sessions: [], total: 0 });
     vi.mocked(listSources).mockResolvedValue([]);
     vi.mocked(listProviders).mockResolvedValue([]);
@@ -119,6 +122,28 @@ describe("App", () => {
     });
     expect(screen.getByText("100")).toBeInTheDocument();
     expect(screen.getByText("25.0%")).toBeInTheDocument();
+  });
+
+  it("breaks usage down by model and the provider that actually served it", async () => {
+    vi.mocked(getModelBreakdown).mockResolvedValue([
+      {
+        model: "deepseek-v4-pro",
+        provider_id: "cc-switch:claude:deepseek",
+        // Attributed by the launcher, not guessed from the model name.
+        provider_name: "DeepSeek",
+        app: "claude_code",
+        totals,
+      },
+    ]);
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("deepseek-v4-pro")).toBeInTheDocument();
+    });
+    expect(screen.getByText("DeepSeek")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "按模型 / 供应商" }),
+    ).toBeInTheDocument();
   });
 
   it("renders the tray quick view from the Core-owned QuickSummary boundary", async () => {

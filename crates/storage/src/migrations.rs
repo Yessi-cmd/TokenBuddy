@@ -18,6 +18,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "0003_cursor_session_identity",
         include_str!("../migrations/0003_cursor_session_identity.sql"),
     ),
+    (
+        4,
+        "0004_session_provider_attributions",
+        include_str!("../migrations/0004_session_provider_attributions.sql"),
+    ),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {

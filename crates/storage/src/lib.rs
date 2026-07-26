@@ -7,9 +7,10 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use thiserror::Error;
 use tokenbuddy_domain::{
     AppKind, AppSettings, CollectionStatus, DashboardSummary, ExportResult, ImportBatch,
-    ImportCursor, LauncherKind, NormalizedUsage, PrecisionLevel, ProviderRecord, ProviderSummary,
-    QuickSummary, QuotaSnapshot, QuotaSummary, SessionDetail, SessionPage, SessionRecord,
-    SessionSummary, SourceRecord, UsageEvent, UsageEventPage, UsageFilters, UsageTotals,
+    ImportCursor, LauncherKind, ModelUsage, NormalizedUsage, PrecisionLevel, ProviderRecord,
+    ProviderSummary, QuickSummary, QuotaSnapshot, QuotaSummary, SessionDetail, SessionPage,
+    SessionProviderAttribution, SessionRecord, SessionSummary, SourceRecord, UsageEvent,
+    UsageEventPage, UsageFilters, UsageTotals,
 };
 
 pub type Result<T> = std::result::Result<T, StorageError>;
@@ -125,21 +126,39 @@ impl Database {
             upsert_provider_record(&transaction, provider)?;
         }
 
+        // Apply provider attributions before inserting events so rows landing in
+        // this same batch already resolve to the real provider, and backfill any
+        // events imported earlier under a guessed one.
+        for attribution in &batch.attributions {
+            upsert_attribution(&transaction, attribution)?;
+            apply_attribution(&transaction, attribution)?;
+        }
+
         for session in &batch.sessions {
             upsert_session(&transaction, session)?;
         }
 
         for event in &batch.usage_events {
-            // Derive a provider/account for session-log events that carry no
-            // upstream identity, so the Providers view reflects real usage
-            // instead of staying permanently empty. Events that already name a
-            // provider (e.g. from a proxy source) are respected as-is.
-            let derived = derive_provider(event);
+            // A launcher-reported attribution is ground truth and wins over any
+            // guess. Only fall back to deriving a provider from the model name
+            // when nothing authoritative is known for this session.
+            let attributed = event
+                .session_id
+                .as_deref()
+                .map(|session_id| lookup_attribution(&transaction, session_id))
+                .transpose()?
+                .flatten();
+            let derived = if attributed.is_some() {
+                None
+            } else {
+                derive_provider(event)
+            };
             if let Some(derived) = &derived {
                 ensure_provider(&transaction, derived, event)?;
                 ensure_account(&transaction, derived)?;
             }
-            let inserted = insert_usage_event(&transaction, event, derived.as_ref())?;
+            let inserted =
+                insert_usage_event(&transaction, event, derived.as_ref(), attributed.as_ref())?;
             if inserted {
                 stats.inserted_events += 1;
             } else {
@@ -645,6 +664,65 @@ impl Database {
         })
     }
 
+    /// Usage grouped by model + serving provider, honouring the same filters as
+    /// the dashboard so the breakdown always adds up to the headline numbers.
+    pub fn model_breakdown(&self, filters: &UsageFilters) -> Result<Vec<ModelUsage>> {
+        let filter_params = UsageFilterParams::from_filters(filters);
+        let mut statement = self.connection.prepare(
+            "SELECT u.model, u.provider_id, p.display_name, u.app,
+                    COUNT(*),
+                    COUNT(u.input_tokens_total), SUM(u.input_tokens_total),
+                    COUNT(u.input_tokens_uncached), SUM(u.input_tokens_uncached),
+                    COUNT(u.cache_read_tokens), SUM(u.cache_read_tokens),
+                    COUNT(u.cache_write_tokens), SUM(u.cache_write_tokens),
+                    COUNT(u.output_tokens_total), SUM(u.output_tokens_total),
+                    COUNT(u.reasoning_tokens), SUM(u.reasoning_tokens),
+                    COUNT(u.visible_output_tokens), SUM(u.visible_output_tokens),
+                    COUNT(u.provider_reported_cost), SUM(u.provider_reported_cost),
+                    COUNT(u.estimated_cost), SUM(u.estimated_cost)
+             FROM usage_events u
+             LEFT JOIN sessions s ON s.id = u.session_id
+             LEFT JOIN providers p ON p.id = u.provider_id
+             WHERE (?1 IS NULL OR u.occurred_at >= ?1)
+               AND (?2 IS NULL OR u.occurred_at < ?2)
+               AND (?3 IS NULL OR u.app = ?3)
+               AND (?4 IS NULL OR u.provider_id = ?4)
+               AND (?5 IS NULL OR u.account_id = ?5)
+               AND (?6 IS NULL OR u.model LIKE ?6)
+               AND (?7 IS NULL OR s.project_path LIKE ?7)
+               AND (?8 IS NULL OR u.precision_token = ?8)
+               AND (?9 IS NULL OR s.title LIKE ?9 OR s.project_path LIKE ?9
+                    OR s.external_session_id LIKE ?9 OR u.model LIKE ?9
+                    OR u.request_id LIKE ?9)
+             GROUP BY u.model, u.provider_id, u.app
+             ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = statement.query_map(
+            params![
+                filter_params.period_start,
+                filter_params.period_end,
+                filter_params.app,
+                filter_params.provider_id,
+                filter_params.account_id,
+                filter_params.model,
+                filter_params.project_path,
+                filter_params.precision,
+                filter_params.search,
+            ],
+            |row| {
+                Ok(ModelUsage {
+                    model: row.get(0)?,
+                    provider_id: row.get(1)?,
+                    provider_name: row.get(2)?,
+                    app: app_from_str(row.get::<_, String>(3)?).map_err(to_sql_error)?,
+                    totals: totals_from_row_at(row, 4)?,
+                })
+            },
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn export_usage(&self, format: &str, filters: &UsageFilters) -> Result<ExportResult> {
         let normalized_format = format.trim().to_ascii_lowercase();
         if normalized_format != "json" && normalized_format != "csv" {
@@ -1071,6 +1149,66 @@ fn upsert_source(conn: &Connection, source: &SourceRecord) -> Result<()> {
     Ok(())
 }
 
+fn upsert_attribution(conn: &Connection, attribution: &SessionProviderAttribution) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_provider_attributions (
+             session_id, provider_id, account_id, source_id, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(session_id) DO UPDATE SET
+             provider_id = excluded.provider_id,
+             account_id = COALESCE(excluded.account_id, session_provider_attributions.account_id),
+             source_id = excluded.source_id,
+             updated_at = excluded.updated_at",
+        params![
+            attribution.session_id,
+            attribution.provider_id,
+            attribution.account_id,
+            attribution.source_id,
+            now().to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Rewrite already-stored events of an attributed session onto the real
+/// provider. Without this, events imported before the launcher was scanned would
+/// keep the provider guessed from their model name.
+fn apply_attribution(conn: &Connection, attribution: &SessionProviderAttribution) -> Result<()> {
+    conn.execute(
+        "UPDATE usage_events
+            SET provider_id = ?2,
+                account_id = COALESCE(?3, account_id)
+          WHERE session_id = ?1",
+        params![
+            attribution.session_id,
+            attribution.provider_id,
+            attribution.account_id,
+        ],
+    )?;
+    Ok(())
+}
+
+fn lookup_attribution(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<SessionProviderAttribution>> {
+    conn.query_row(
+        "SELECT session_id, provider_id, account_id, source_id
+           FROM session_provider_attributions WHERE session_id = ?1",
+        params![session_id],
+        |row| {
+            Ok(SessionProviderAttribution {
+                session_id: row.get(0)?,
+                provider_id: row.get(1)?,
+                account_id: row.get(2)?,
+                source_id: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 fn upsert_provider_record(conn: &Connection, provider: &ProviderRecord) -> Result<()> {
     let timestamp = now().to_rfc3339();
     conn.execute(
@@ -1147,19 +1285,22 @@ fn insert_usage_event(
     conn: &Connection,
     event: &UsageEvent,
     derived: Option<&DerivedProvider>,
+    attributed: Option<&SessionProviderAttribution>,
 ) -> Result<bool> {
     let raw_usage_json = event
         .raw_usage_json
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
-    let provider_id = event
-        .provider_id
-        .clone()
+    // Precedence: launcher-reported truth > identity the adapter already
+    // resolved > provider guessed from the model name.
+    let provider_id = attributed
+        .map(|value| value.provider_id.clone())
+        .or_else(|| event.provider_id.clone())
         .or_else(|| derived.map(|derived| derived.id.clone()));
-    let account_id = event
-        .account_id
-        .clone()
+    let account_id = attributed
+        .and_then(|value| value.account_id.clone())
+        .or_else(|| event.account_id.clone())
         .or_else(|| derived.map(|derived| derived.account_id.clone()));
     let changed = conn.execute(
         "INSERT INTO usage_events (
@@ -1765,8 +1906,8 @@ mod tests {
     use chrono::{Duration, Utc};
     use tokenbuddy_domain::{
         AppKind, AppSettings, CollectionStatus, ImportBatch, ImportCursor, IngestSource,
-        LauncherKind, NormalizedUsage, PrecisionLevel, SessionRecord, SourceRecord, UsageEvent,
-        UsageFilters,
+        LauncherKind, NormalizedUsage, PrecisionLevel, SessionProviderAttribution, SessionRecord,
+        SourceRecord, UsageEvent, UsageFilters,
     };
 
     use super::{Database, RetentionOutcome};
@@ -2070,6 +2211,72 @@ mod tests {
         assert_eq!(
             page.sessions[0].session.ended_at,
             Some(base + Duration::minutes(20))
+        );
+    }
+
+    #[test]
+    fn launcher_attribution_beats_provider_guessed_from_the_model_name() {
+        let mut database = Database::open_in_memory().expect("database opens");
+
+        // A relay-served model: the name says nothing about the real upstream.
+        let mut relayed = event("relayed-1", Some(100));
+        relayed.model = Some("deepseek-v4-pro".to_owned());
+        relayed.app = AppKind::ClaudeCode;
+        database
+            .apply_import_batch(&ImportBatch {
+                sessions: vec![session()],
+                usage_events: vec![relayed.clone()],
+                ..ImportBatch::default()
+            })
+            .expect("session-log import");
+
+        // Without attribution the provider is guessed — and guesses wrong here.
+        let guessed = database
+            .list_usage_events(None, 10, 0)
+            .expect("events")
+            .events[0]
+            .provider_id
+            .clone();
+        assert_eq!(guessed.as_deref(), Some("anthropic"));
+
+        // The launcher then reports the truth for that session.
+        database
+            .apply_import_batch(&ImportBatch {
+                attributions: vec![SessionProviderAttribution {
+                    session_id: "session-1".to_owned(),
+                    provider_id: "cc-switch:claude:deepseek".to_owned(),
+                    account_id: None,
+                    source_id: "cc-switch".to_owned(),
+                }],
+                ..ImportBatch::default()
+            })
+            .expect("attribution import");
+
+        // Existing rows are corrected...
+        let corrected = database
+            .list_usage_events(None, 10, 0)
+            .expect("events")
+            .events[0]
+            .provider_id
+            .clone();
+        assert_eq!(corrected.as_deref(), Some("cc-switch:claude:deepseek"));
+
+        // ...and events imported afterwards never fall back to the guess.
+        let mut later = event("relayed-2", Some(50));
+        later.model = Some("deepseek-v4-pro".to_owned());
+        later.app = AppKind::ClaudeCode;
+        database
+            .apply_import_batch(&ImportBatch {
+                usage_events: vec![later],
+                ..ImportBatch::default()
+            })
+            .expect("later import");
+        let page = database.list_usage_events(None, 10, 0).expect("events");
+        assert_eq!(page.total, 2);
+        assert!(
+            page.events
+                .iter()
+                .all(|event| event.provider_id.as_deref() == Some("cc-switch:claude:deepseek"))
         );
     }
 

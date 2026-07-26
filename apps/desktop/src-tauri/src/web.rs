@@ -236,6 +236,9 @@ fn route_request_with_autostart(
         ("GET", "/api/dashboard-summary") => core
             .dashboard_summary_filtered(usage_filters_from_query(query))
             .map_or_else(api_error, |summary| json_response(200, &summary)),
+        ("GET", "/api/model-breakdown") => core
+            .model_breakdown(usage_filters_from_query(query))
+            .map_or_else(api_error, |breakdown| json_response(200, &breakdown)),
         ("GET", "/api/sources") => core
             .list_sources()
             .map_or_else(api_error, |sources| json_response(200, &sources)),

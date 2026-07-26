@@ -60,6 +60,17 @@ fn get_dashboard_summary(
 }
 
 #[tauri::command]
+fn get_model_breakdown(
+    state: State<'_, AppState>,
+    filters: Option<UsageFilters>,
+) -> Result<Vec<tokenbuddy_domain::ModelUsage>, String> {
+    state
+        .core
+        .model_breakdown(filters.unwrap_or_default())
+        .map_err(core_error)
+}
+
+#[tauri::command]
 fn list_sessions(
     state: State<'_, AppState>,
     filters: Option<UsageFilters>,
@@ -790,6 +801,7 @@ pub fn run() {
             greet,
             get_quick_summary,
             get_dashboard_summary,
+            get_model_breakdown,
             export_usage,
             save_export,
             show_main_window,
