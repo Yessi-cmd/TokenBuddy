@@ -3865,7 +3865,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokenbuddy-cc-switch"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -3878,7 +3878,7 @@ dependencies = [
 
 [[package]]
 name = "tokenbuddy-claude-session"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -3891,7 +3891,7 @@ dependencies = [
 
 [[package]]
 name = "tokenbuddy-cockpit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -3904,7 +3904,7 @@ dependencies = [
 
 [[package]]
 name = "tokenbuddy-codex-session"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -3917,7 +3917,7 @@ dependencies = [
 
 [[package]]
 name = "tokenbuddy-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "notify",
@@ -3934,7 +3934,7 @@ dependencies = [
 
 [[package]]
 name = "tokenbuddy-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -3956,7 +3956,7 @@ dependencies = [
 
 [[package]]
 name = "tokenbuddy-domain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -3965,7 +3965,7 @@ dependencies = [
 
 [[package]]
 name = "tokenbuddy-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "rusqlite",
