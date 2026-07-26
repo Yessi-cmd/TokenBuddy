@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capability for the TokenBuddy main window",
   "windows": ["main", "quick"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "autostart:default"]
 }

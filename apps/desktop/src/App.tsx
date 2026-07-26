@@ -1,22 +1,33 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import {
+  getAppSettings,
+  detectClaudePath,
   detectCodexPath,
   getDashboardSummary,
   getQuickSummary,
   getSessionDetail,
+  exportUsage,
+  listProviders,
+  listQuotaSnapshots,
   listSessions,
   listSources,
   openLocalWebApi,
+  rescanClaude,
   rescanCodex,
+  updateAppSettings,
+  type AppSettings,
   type QuickSummary,
   type DashboardSummary,
   type DetectionResult,
   type PrecisionLevel,
+  type ProviderSummary,
+  type QuotaSnapshot,
   type SessionDetail,
   type SessionSummary,
   type SourceRecord,
   type UsageEvent,
+  type UsageFilters,
   type UsageTotals,
 } from "./lib/api";
 
@@ -34,11 +45,146 @@ const emptyTotals: UsageTotals = {
   cache_hit_rate_percent: null,
 };
 
+type DashboardFilterForm = {
+  period_start: string;
+  period_end: string;
+  app: "" | "codex" | "claude_code" | "unknown";
+  provider_id: string;
+  account_id: string;
+  model: string;
+  project_path: string;
+  precision: "" | PrecisionLevel;
+  search: string;
+};
+
+function utcDateInput(date = new Date()): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function initialDashboardFilterForm(): DashboardFilterForm {
+  const today = utcDateInput();
+  return {
+    period_start: today,
+    period_end: today,
+    app: "",
+    provider_id: "",
+    account_id: "",
+    model: "",
+    project_path: "",
+    precision: "",
+    search: "",
+  };
+}
+
+function dashboardFilters(form: DashboardFilterForm): UsageFilters {
+  const periodStart = form.period_start
+    ? `${form.period_start}T00:00:00.000Z`
+    : null;
+  let periodEnd: string | null = null;
+  if (form.period_end) {
+    const end = new Date(`${form.period_end}T00:00:00.000Z`);
+    if (!Number.isNaN(end.valueOf())) {
+      end.setUTCDate(end.getUTCDate() + 1);
+      periodEnd = end.toISOString();
+    }
+  }
+  return {
+    period_start: periodStart,
+    period_end: periodEnd,
+    app: form.app || null,
+    provider_id: form.provider_id.trim() || null,
+    account_id: form.account_id.trim() || null,
+    model: form.model.trim() || null,
+    project_path: form.project_path.trim() || null,
+    precision: form.precision || null,
+    search: form.search.trim() || null,
+  };
+}
+
 function App() {
-  return window.location.pathname === "/quick" ? (
-    <QuickSummaryView />
-  ) : (
-    <DashboardView />
+  const pathname = usePathname();
+  if (pathname === "/quick") return <QuickSummaryView />;
+  if (pathname === "/providers") return <ProvidersView />;
+  if (pathname === "/quotas") return <QuotasView />;
+  if (pathname === "/settings") return <SettingsView />;
+  if (pathname === "/sources") return <SourcesView />;
+  if (pathname === "/sessions") return <SessionsView />;
+  if (pathname.startsWith("/sessions/")) {
+    return (
+      <SessionRouteView
+        sessionId={decodeURIComponent(pathname.slice("/sessions/".length))}
+      />
+    );
+  }
+  return <DashboardView />;
+}
+
+function usePathname(): string {
+  const [pathname, setPathname] = useState(() => window.location.pathname);
+  useEffect(() => {
+    const handlePopState = () => setPathname(window.location.pathname);
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+  return pathname;
+}
+
+function navigate(path: string) {
+  window.history.pushState({}, "", path);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+function AppNavigation() {
+  return (
+    <nav className="route-nav" aria-label="主要导航">
+      <RouteLink to="/dashboard">总览</RouteLink>
+      <RouteLink to="/sessions">会话</RouteLink>
+      <RouteLink to="/providers">Providers</RouteLink>
+      <RouteLink to="/quotas">额度</RouteLink>
+      <RouteLink to="/sources">数据源</RouteLink>
+      <RouteLink to="/settings">设置</RouteLink>
+    </nav>
+  );
+}
+
+function RouteLink({ to, children }: { to: string; children: string }) {
+  return (
+    <a
+      href={to}
+      onClick={(event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey) return;
+        event.preventDefault();
+        navigate(to);
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+function PageFrame({
+  eyebrow,
+  title,
+  subtitle,
+  children,
+}: {
+  eyebrow: string;
+  title: string;
+  subtitle: string;
+  children: ReactNode;
+}) {
+  return (
+    <main className="app-shell">
+      <header className="page-header">
+        <div>
+          <p className="eyebrow">{eyebrow}</p>
+          <h1>{title}</h1>
+          <p className="subtitle">{subtitle}</p>
+        </div>
+        <AppNavigation />
+      </header>
+      {children}
+    </main>
   );
 }
 
@@ -51,11 +197,23 @@ function DashboardView() {
   );
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [codexHome, setCodexHome] = useState("");
-  const [detection, setDetection] = useState<DetectionResult | null>(null);
+  const [claudeHome, setClaudeHome] = useState("");
+  const [codexDetection, setCodexDetection] = useState<DetectionResult | null>(
+    null,
+  );
+  const [claudeDetection, setClaudeDetection] =
+    useState<DetectionResult | null>(null);
   const [status, setStatus] = useState("正在连接本地数据层…");
   const [error, setError] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const [filterForm, setFilterForm] = useState<DashboardFilterForm>(
+    initialDashboardFilterForm,
+  );
+  const [exportingFormat, setExportingFormat] = useState<"csv" | "json" | null>(
+    null,
+  );
+  const filters = useMemo(() => dashboardFilters(filterForm), [filterForm]);
 
   useEffect(() => {
     let active = true;
@@ -63,8 +221,8 @@ function DashboardView() {
     async function loadOverview() {
       try {
         const [nextDashboard, nextSessions, nextSources] = await Promise.all([
-          getDashboardSummary(),
-          listSessions(),
+          getDashboardSummary(filters),
+          listSessions(filterForm.search.trim() || null),
           listSources(),
         ]);
         if (!active) return;
@@ -84,7 +242,7 @@ function DashboardView() {
     return () => {
       active = false;
     };
-  }, [refreshVersion]);
+  }, [filterForm.search, filters, refreshVersion]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -129,7 +287,7 @@ function DashboardView() {
   async function handleDetect() {
     try {
       const nextDetection = await detectCodexPath(codexHome.trim() || null);
-      setDetection(nextDetection);
+      setCodexDetection(nextDetection);
       setStatus(
         nextDetection.detected
           ? "已检测到 Codex Session 目录"
@@ -141,12 +299,30 @@ function DashboardView() {
     }
   }
 
+  async function handleDetectClaude() {
+    try {
+      const nextDetection = await detectClaudePath(claudeHome.trim() || null);
+      setClaudeDetection(nextDetection);
+      setStatus(
+        nextDetection.detected
+          ? "已检测到 Claude Code projects 目录"
+          : "未检测到 Claude Code projects 目录",
+      );
+      setError(null);
+    } catch {
+      setError("无法检测 Claude Home，请确认桌面应用已启动。");
+    }
+  }
+
   async function handleScan() {
     setIsScanning(true);
     try {
-      const result = await rescanCodex(codexHome.trim() || null);
+      const [codexResult, claudeResult] = await Promise.all([
+        rescanCodex(codexHome.trim() || null),
+        rescanClaude(claudeHome.trim() || null),
+      ]);
       setStatus(
-        `扫描完成：新增 ${result.inserted_events} 条事件，跳过 ${result.skipped_records} 条记录`,
+        `扫描完成：新增 ${codexResult.inserted_events + claudeResult.inserted_events} 条事件，跳过 ${codexResult.skipped_records + claudeResult.skipped_records} 条记录`,
       );
       setError(null);
       setRefreshVersion((value) => value + 1);
@@ -166,6 +342,26 @@ function DashboardView() {
       setError(null);
     } catch {
       setError("无法启动本地网页面板；请先通过 Tauri 桌面应用运行。");
+    }
+  }
+
+  async function handleExport(format: "csv" | "json") {
+    setExportingFormat(format);
+    try {
+      const result = await exportUsage(format, filters);
+      const blob = new Blob([result.content], { type: result.mime_type });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = result.filename;
+      link.click();
+      URL.revokeObjectURL(url);
+      setError(null);
+      setStatus(`已导出 ${result.filename}`);
+    } catch {
+      setError(`无法导出 ${format.toUpperCase()}；请检查本地数据层。`);
+    } finally {
+      setExportingFormat(null);
     }
   }
 
@@ -191,7 +387,7 @@ function DashboardView() {
             onClick={handleScan}
             disabled={isScanning}
           >
-            {isScanning ? "扫描中…" : "扫描 Codex"}
+            {isScanning ? "扫描中…" : "扫描 Codex + Claude"}
           </button>
           <button
             className="quiet-button"
@@ -202,6 +398,7 @@ function DashboardView() {
           </button>
         </div>
       </header>
+      <AppNavigation />
 
       {error ? <p className="notice notice-warning">{error}</p> : null}
 
@@ -211,7 +408,7 @@ function DashboardView() {
             数据源
           </p>
           <p className="source-description">
-            当前只读导入 Codex Session JSONL；未知值保持
+            当前只读导入 Codex 与 Claude Session JSONL；未知值保持
             Unavailable，不会被折算成 0。
           </p>
         </div>
@@ -224,14 +421,198 @@ function DashboardView() {
             placeholder="留空使用系统默认路径"
           />
           <button className="quiet-button" type="button" onClick={handleDetect}>
-            检测路径
+            检测 Codex
+          </button>
+          <label htmlFor="claude-home">Claude Home</label>
+          <input
+            id="claude-home"
+            value={claudeHome}
+            onChange={(event) => setClaudeHome(event.target.value)}
+            placeholder="留空使用系统默认路径"
+          />
+          <button
+            className="quiet-button"
+            type="button"
+            onClick={handleDetectClaude}
+          >
+            检测 Claude
           </button>
         </div>
-        {detection ? (
-          <span className={detection.detected ? "detection ok" : "detection"}>
-            {detection.detected ? "Detected" : "Not found"}
-          </span>
-        ) : null}
+        <div className="source-detections">
+          {codexDetection ? (
+            <span
+              className={codexDetection.detected ? "detection ok" : "detection"}
+            >
+              Codex {codexDetection.detected ? "Detected" : "Not found"}
+            </span>
+          ) : null}
+          {claudeDetection ? (
+            <span
+              className={
+                claudeDetection.detected ? "detection ok" : "detection"
+              }
+            >
+              Claude {claudeDetection.detected ? "Detected" : "Not found"}
+            </span>
+          ) : null}
+        </div>
+      </section>
+
+      <section
+        className="panel filters-panel"
+        aria-labelledby="filters-heading"
+      >
+        <div className="panel-heading filters-heading">
+          <div>
+            <p className="section-kicker" id="filters-heading">
+              Filter & export
+            </p>
+            <h2>统计筛选</h2>
+          </div>
+          <div className="filter-actions">
+            <button
+              className="quiet-button"
+              type="button"
+              onClick={() => setFilterForm(initialDashboardFilterForm())}
+            >
+              清除筛选
+            </button>
+            <button
+              className="quiet-button"
+              type="button"
+              onClick={() => void handleExport("csv")}
+              disabled={exportingFormat !== null}
+            >
+              {exportingFormat === "csv" ? "导出中…" : "导出 CSV"}
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => void handleExport("json")}
+              disabled={exportingFormat !== null}
+            >
+              {exportingFormat === "json" ? "导出中…" : "导出 JSON"}
+            </button>
+          </div>
+        </div>
+        <div className="filters-grid">
+          <label>
+            <span>开始日期</span>
+            <input
+              type="date"
+              value={filterForm.period_start}
+              onChange={(event) =>
+                setFilterForm({
+                  ...filterForm,
+                  period_start: event.target.value,
+                })
+              }
+            />
+          </label>
+          <label>
+            <span>结束日期</span>
+            <input
+              type="date"
+              value={filterForm.period_end}
+              onChange={(event) =>
+                setFilterForm({ ...filterForm, period_end: event.target.value })
+              }
+            />
+          </label>
+          <label>
+            <span>应用</span>
+            <select
+              value={filterForm.app}
+              onChange={(event) =>
+                setFilterForm({
+                  ...filterForm,
+                  app: event.target.value as DashboardFilterForm["app"],
+                })
+              }
+            >
+              <option value="">全部</option>
+              <option value="codex">Codex</option>
+              <option value="claude_code">Claude Code</option>
+              <option value="unknown">Unknown</option>
+            </select>
+          </label>
+          <label>
+            <span>精度</span>
+            <select
+              value={filterForm.precision}
+              onChange={(event) =>
+                setFilterForm({
+                  ...filterForm,
+                  precision: event.target
+                    .value as DashboardFilterForm["precision"],
+                })
+              }
+            >
+              <option value="">全部</option>
+              <option value="verified">Verified</option>
+              <option value="exact_session">Exact session</option>
+              <option value="correlated">Correlated</option>
+              <option value="estimated">Estimated</option>
+              <option value="unavailable">Unavailable</option>
+            </select>
+          </label>
+          <label>
+            <span>Provider ID</span>
+            <input
+              value={filterForm.provider_id}
+              onChange={(event) =>
+                setFilterForm({
+                  ...filterForm,
+                  provider_id: event.target.value,
+                })
+              }
+              placeholder="精确匹配"
+            />
+          </label>
+          <label>
+            <span>Account ID</span>
+            <input
+              value={filterForm.account_id}
+              onChange={(event) =>
+                setFilterForm({ ...filterForm, account_id: event.target.value })
+              }
+              placeholder="精确匹配"
+            />
+          </label>
+          <label>
+            <span>Model</span>
+            <input
+              value={filterForm.model}
+              onChange={(event) =>
+                setFilterForm({ ...filterForm, model: event.target.value })
+              }
+              placeholder="包含匹配"
+            />
+          </label>
+          <label>
+            <span>项目路径</span>
+            <input
+              value={filterForm.project_path}
+              onChange={(event) =>
+                setFilterForm({
+                  ...filterForm,
+                  project_path: event.target.value,
+                })
+              }
+              placeholder="包含匹配"
+            />
+          </label>
+          <label className="filter-search">
+            <span>搜索</span>
+            <input
+              value={filterForm.search}
+              onChange={(event) =>
+                setFilterForm({ ...filterForm, search: event.target.value })
+              }
+              placeholder="标题、项目、会话 ID、模型或请求 ID"
+            />
+          </label>
+        </div>
       </section>
 
       <section className="dashboard-grid" aria-label="今日统计">
@@ -288,7 +669,7 @@ function DashboardView() {
           ) : (
             <EmptyState
               title="还没有导入会话"
-              description="确认 Codex Home 后点击“扫描 Codex”，TokenBuddy 会从 JSONL 增量导入。"
+              description="确认 Codex 或 Claude Home 后点击“扫描 Codex + Claude”，TokenBuddy 会从 JSONL 增量导入。"
             />
           )}
         </div>
@@ -319,11 +700,537 @@ function DashboardView() {
   );
 }
 
+function ProvidersView() {
+  const [providers, setProviders] = useState<ProviderSummary[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void listProviders()
+      .then((nextProviders) => {
+        if (active) {
+          setProviders(nextProviders);
+          setError(null);
+        }
+      })
+      .catch(() => {
+        if (active) setError("无法读取 Provider 统计。");
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return (
+    <PageFrame
+      eyebrow="Provider observatory"
+      title="Providers"
+      subtitle="只展示已被数据源明确识别的 Provider；无法归属时保持 Unavailable。"
+    >
+      {error ? <p className="notice notice-warning">{error}</p> : null}
+      {providers.length ? (
+        <section className="route-grid" aria-label="Provider 统计">
+          {providers.map((provider) => (
+            <article className="panel route-card" key={provider.id}>
+              <div className="panel-heading route-card-heading">
+                <div>
+                  <p className="section-kicker">{provider.provider_family}</p>
+                  <h2>{provider.display_name}</h2>
+                </div>
+                <span className="count-label">
+                  {formatTokens(provider.request_count)} 请求
+                </span>
+              </div>
+              <dl className="summary-list">
+                <SummaryItem
+                  label="上游 URL"
+                  value={provider.upstream_url || "Unavailable"}
+                />
+                <SummaryItem
+                  label="账号数"
+                  value={formatTokens(provider.account_count)}
+                />
+                <SummaryItem
+                  label="成功率"
+                  value={formatPercent(provider.success_rate_percent)}
+                />
+                <SummaryItem
+                  label="平均延迟"
+                  value={
+                    provider.average_latency_ms == null
+                      ? "Unavailable"
+                      : `${provider.average_latency_ms.toFixed(0)} ms`
+                  }
+                />
+                <SummaryItem
+                  label="输入 / 输出"
+                  value={`${formatTokens(provider.totals.input_tokens_total)} / ${formatTokens(provider.totals.output_tokens_total)}`}
+                />
+                <SummaryItem label="费用" value={formatCost(provider.totals)} />
+              </dl>
+            </article>
+          ))}
+        </section>
+      ) : (
+        <section className="panel route-panel">
+          <EmptyState
+            title="Provider 数据 Unavailable"
+            description="当前已导入 Codex 与 Claude Code Session；Provider Adapter 尚未提供可验证归属。"
+          />
+        </section>
+      )}
+    </PageFrame>
+  );
+}
+
+function QuotasView() {
+  const [quotas, setQuotas] = useState<QuotaSnapshot[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void listQuotaSnapshots()
+      .then((nextQuotas) => {
+        if (active) {
+          setQuotas(nextQuotas);
+          setError(null);
+        }
+      })
+      .catch(() => {
+        if (active) setError("无法读取官方额度快照。");
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return (
+    <PageFrame
+      eyebrow="Official quota windows"
+      title="官方额度"
+      subtitle="额度窗口与原始 Token 分开保存；不会从百分比反推准确 Token。"
+    >
+      {error ? <p className="notice notice-warning">{error}</p> : null}
+      {quotas.length ? (
+        <section className="panel route-panel" aria-label="官方额度快照">
+          <div className="quota-list">
+            {quotas.map((quota) => (
+              <article className="quota-row" key={quota.id}>
+                <div>
+                  <strong>{quota.window_type}</strong>
+                  <span>
+                    {quota.provider_name || "Provider Unavailable"} ·{" "}
+                    {quota.account_name || "账号 Unavailable"}
+                  </span>
+                </div>
+                <div>
+                  <strong>{formatPercent(quota.used_percent)} 已用</strong>
+                  <span>
+                    剩余 {formatPercent(quota.remaining_percent)} ·{" "}
+                    {precisionLabel(quota.precision)}
+                  </span>
+                </div>
+                <div>
+                  <strong>{formatDate(quota.captured_at)}</strong>
+                  <span>
+                    重置{" "}
+                    {quota.reset_at
+                      ? formatDate(quota.reset_at)
+                      : "Unavailable"}
+                  </span>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : (
+        <section className="panel route-panel">
+          <EmptyState
+            title="官方额度 Unavailable"
+            description="尚未连接官方额度数据源；此处不会使用 Session Token 估算订阅额度。"
+          />
+        </section>
+      )}
+    </PageFrame>
+  );
+}
+
+function SourcesView() {
+  const [sources, setSources] = useState<SourceRecord[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void listSources()
+      .then((nextSources) => {
+        if (active) {
+          setSources(nextSources);
+          setError(null);
+        }
+      })
+      .catch(() => {
+        if (active) setError("无法读取数据源状态。");
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return (
+    <PageFrame
+      eyebrow="Read-only adapters"
+      title="数据源"
+      subtitle="每个 Adapter 独立报告路径、健康状态和最近错误。"
+    >
+      {error ? <p className="notice notice-warning">{error}</p> : null}
+      {sources.length ? (
+        <section className="route-grid" aria-label="数据源状态">
+          {sources.map((source) => (
+            <article className="panel route-card" key={source.id}>
+              <div className="panel-heading route-card-heading">
+                <div>
+                  <p className="section-kicker">{source.adapter_type}</p>
+                  <h2>{source.display_name}</h2>
+                </div>
+                <span className="detection ok">
+                  {source.health_status || "Unavailable"}
+                </span>
+              </div>
+              <dl className="summary-list">
+                <SummaryItem
+                  label="检测路径"
+                  value={source.path_or_endpoint || "Unavailable"}
+                />
+                <SummaryItem
+                  label="版本"
+                  value={source.detected_version || "Unavailable"}
+                />
+                <SummaryItem
+                  label="最近导入"
+                  value={
+                    source.last_success_at
+                      ? formatDate(source.last_success_at)
+                      : "Unavailable"
+                  }
+                />
+                <SummaryItem
+                  label="最近错误"
+                  value={source.last_error || "Unavailable"}
+                />
+              </dl>
+            </article>
+          ))}
+        </section>
+      ) : (
+        <section className="panel route-panel">
+          <EmptyState
+            title="尚未登记数据源"
+            description="启动 Core 后会在此展示 Adapter 状态。"
+          />
+        </section>
+      )}
+    </PageFrame>
+  );
+}
+
+function SessionsView() {
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void listSessions(null, 100, 0)
+      .then((page) => {
+        if (active) {
+          setSessions(page.sessions);
+          setError(null);
+        }
+      })
+      .catch(() => {
+        if (active) setError("无法读取会话列表。");
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return (
+    <PageFrame
+      eyebrow="Session history"
+      title="会话"
+      subtitle="从会话追踪到请求级 Token，精度和缺失值始终可见。"
+    >
+      {error ? <p className="notice notice-warning">{error}</p> : null}
+      <section
+        className="panel sessions-panel route-panel"
+        aria-label="会话列表"
+      >
+        {sessions.length ? (
+          <div className="session-list">
+            {sessions.map((session) => (
+              <SessionRow
+                key={session.session.id}
+                summary={session}
+                selected={false}
+                onSelect={() =>
+                  navigate(
+                    `/sessions/${encodeURIComponent(session.session.id)}`,
+                  )
+                }
+              />
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            title="还没有导入会话"
+            description="确认 Codex Home 后开始增量导入。"
+          />
+        )}
+      </section>
+    </PageFrame>
+  );
+}
+
+function SessionRouteView({ sessionId }: { sessionId: string }) {
+  const [detail, setDetail] = useState<SessionDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void getSessionDetail(sessionId)
+      .then((nextDetail) => {
+        if (active) {
+          setDetail(nextDetail);
+          setError(null);
+        }
+      })
+      .catch(() => {
+        if (active) setError("无法读取会话详情。");
+      });
+    return () => {
+      active = false;
+    };
+  }, [sessionId]);
+
+  return (
+    <PageFrame
+      eyebrow="Session detail"
+      title="会话详情"
+      subtitle="请求时间线只来自 Core 查询服务，不重新扫描原始日志。"
+    >
+      <p className="route-back">
+        <RouteLink to="/sessions">← 返回会话列表</RouteLink>
+      </p>
+      {error ? <p className="notice notice-warning">{error}</p> : null}
+      {detail ? (
+        <section className="panel detail-panel route-panel">
+          <SessionDetailView detail={detail} />
+        </section>
+      ) : (
+        <section className="panel route-panel">
+          <EmptyState
+            title="会话 Unavailable"
+            description="Core 没有返回该会话。"
+          />
+        </section>
+      )}
+    </PageFrame>
+  );
+}
+
+const defaultAppSettings: AppSettings = {
+  codex_home: null,
+  claude_home: null,
+  cc_switch_db_path: null,
+  cockpit_path: null,
+  otel_port: null,
+  auto_start: false,
+  proxy_enabled: false,
+  save_request_metadata: false,
+  data_retention_days: null,
+};
+
+function SettingsView() {
+  const [settings, setSettings] = useState<AppSettings>(defaultAppSettings);
+  const [status, setStatus] = useState("正在读取设置…");
+  const [error, setError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void getAppSettings()
+      .then((nextSettings) => {
+        if (active) {
+          setSettings(nextSettings);
+          setStatus("设置已加载");
+          setError(null);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setStatus("设置不可用");
+          setError("无法读取 Core 设置。");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function handleSave() {
+    setIsSaving(true);
+    try {
+      const nextSettings = await updateAppSettings({
+        ...settings,
+        codex_home: settings.codex_home?.trim() || null,
+        claude_home: settings.claude_home?.trim() || null,
+        cc_switch_db_path: settings.cc_switch_db_path?.trim() || null,
+        cockpit_path: settings.cockpit_path?.trim() || null,
+      });
+      setSettings(nextSettings);
+      setStatus("设置已保存");
+      setError(null);
+    } catch {
+      setError("设置保存失败；请检查路径或 Core 状态。");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <PageFrame
+      eyebrow="Local configuration"
+      title="设置"
+      subtitle="Codex 与 Claude Code Session 路径由 Core 持久化并自动增量导入；其他 Adapter 保持 Unavailable。"
+    >
+      {error ? <p className="notice notice-warning">{error}</p> : null}
+      <section className="panel settings-panel" aria-label="应用设置">
+        <div className="settings-heading">
+          <div>
+            <p className="section-kicker">采集路径</p>
+            <h2>数据源路径</h2>
+          </div>
+          <span
+            className="status-pill"
+            data-state={error ? "warning" : "ready"}
+          >
+            {status}
+          </span>
+        </div>
+        <div className="settings-grid">
+          <SettingsField
+            id="settings-codex-home"
+            label="Codex Home"
+            value={settings.codex_home}
+            onChange={(value) =>
+              setSettings({ ...settings, codex_home: value })
+            }
+            placeholder="留空使用系统默认路径"
+          />
+          <SettingsField
+            id="settings-claude-home"
+            label="Claude Home"
+            value={settings.claude_home}
+            onChange={(value) =>
+              setSettings({ ...settings, claude_home: value })
+            }
+            placeholder="留空使用系统默认路径"
+          />
+          <SettingsField
+            id="settings-cc-switch"
+            label="CC Switch DB"
+            value={settings.cc_switch_db_path}
+            onChange={(value) =>
+              setSettings({ ...settings, cc_switch_db_path: value })
+            }
+            placeholder="Unavailable（只读 Adapter 尚未启用）"
+          />
+          <SettingsField
+            id="settings-cockpit"
+            label="Cockpit 数据路径"
+            value={settings.cockpit_path}
+            onChange={(value) =>
+              setSettings({ ...settings, cockpit_path: value })
+            }
+            placeholder="Unavailable（只读 Adapter 尚未启用）"
+          />
+        </div>
+        <div className="settings-flags">
+          <label>
+            <input
+              type="checkbox"
+              checked={settings.auto_start}
+              onChange={(event) =>
+                setSettings({ ...settings, auto_start: event.target.checked })
+              }
+            />
+            开机自动启动（修改后立即生效）
+          </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={settings.proxy_enabled}
+              disabled
+              readOnly
+            />
+            允许本地代理（Phase 7，当前关闭）
+          </label>
+        </div>
+        <button
+          className="primary-button"
+          type="button"
+          onClick={handleSave}
+          disabled={isSaving}
+        >
+          {isSaving ? "保存中…" : "保存设置"}
+        </button>
+      </section>
+    </PageFrame>
+  );
+}
+
+function SettingsField({
+  id,
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  id: string;
+  label: string;
+  value: string | null;
+  onChange: (value: string) => void;
+  placeholder: string;
+}) {
+  return (
+    <label className="settings-field" htmlFor={id}>
+      <span>{label}</span>
+      <input
+        id={id}
+        value={value ?? ""}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+      />
+    </label>
+  );
+}
+
+function SummaryItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
+  );
+}
+
 function QuickSummaryView() {
   const [summary, setSummary] = useState<QuickSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    document.documentElement.classList.add("quick-window");
+    document.body.classList.add("quick-window");
     let active = true;
 
     async function loadSummary() {
@@ -344,66 +1251,92 @@ function QuickSummaryView() {
     return () => {
       active = false;
       window.clearInterval(timer);
+      document.documentElement.classList.remove("quick-window");
+      document.body.classList.remove("quick-window");
     };
   }, []);
 
+  const quotaSummary = summary?.quota_summary;
+
   return (
     <main className="quick-shell">
-      <div className="quick-heading">
-        <div>
-          <p className="eyebrow">后台 Core</p>
-          <h1>TokenBuddy</h1>
+      <section className="quick-card">
+        <div className="quick-heading">
+          <div className="quick-brand">
+            <span className="quick-brand-mark" aria-hidden="true">
+              T
+            </span>
+            <div>
+              <p className="eyebrow">Token usage</p>
+              <h1>TokenBuddy</h1>
+            </div>
+          </div>
+          <span
+            className={`quick-status status-${summary?.collection_status ?? "starting"}`}
+          >
+            <span className="quick-status-dot" aria-hidden="true" />
+            {collectionStatusLabel(summary?.collection_status)}
+          </span>
         </div>
-        <span
-          className={`quick-status status-${summary?.collection_status ?? "starting"}`}
-        >
-          {collectionStatusLabel(summary?.collection_status)}
-        </span>
-      </div>
-      {error ? <p className="notice notice-warning">{error}</p> : null}
-      <section className="quick-primary" aria-label="今日 Token">
-        <span>今日 Token</span>
-        <strong>{formatTokens(summary?.today_total_tokens)}</strong>
+        {error ? <p className="notice notice-warning">{error}</p> : null}
+        <section className="quick-primary" aria-label="今日 Token">
+          <div className="quick-primary-header">
+            <span>今日 Token</span>
+            <small>本地事件汇总</small>
+          </div>
+          <strong>{formatTokens(summary?.today_total_tokens)}</strong>
+          <p>口径：输入 + 输出；未知字段不会折算成 0</p>
+        </section>
+        <section className="quick-session" aria-label="会话摘要">
+          <div className="quick-session-topline">
+            <span>最近活动会话</span>
+            <span className="quick-session-count">
+              {summary?.active_session_id || "Unavailable"}
+            </span>
+          </div>
+          <div className="quick-session-title">
+            <span>标题</span>
+            <strong>{summary?.active_session_title || "Unavailable"}</strong>
+          </div>
+          <div className="quick-model">
+            {summary?.active_app || "Unavailable"} ·{" "}
+            {summary?.provider_name || "Provider Unavailable"} ·{" "}
+            {summary?.model || "Model Unavailable"}
+          </div>
+          <div className="quick-project">
+            项目：{summary?.active_project_path || "Unavailable"}
+          </div>
+          <div className="quick-metrics">
+            <QuickMetric
+              label="输入"
+              value={formatTokens(summary?.session_input_tokens)}
+            />
+            <QuickMetric
+              label="缓存读取"
+              value={formatTokens(summary?.session_cache_read_tokens)}
+            />
+            <QuickMetric
+              label="输出"
+              value={formatTokens(summary?.session_output_tokens)}
+            />
+            <QuickMetric
+              label="缓存命中率"
+              value={formatPercent(summary?.session_cache_hit_rate ?? null)}
+            />
+          </div>
+        </section>
+        {quotaSummary ? (
+          <p className="quick-note">
+            官方额度：{formatPercent(quotaSummary.used_percent)} 已用 ·{" "}
+            {quotaSummary.precision}
+          </p>
+        ) : (
+          <p className="quick-note">官方额度 Unavailable</p>
+        )}
+        {summary?.latest_warning ? (
+          <p className="notice notice-warning">{summary.latest_warning}</p>
+        ) : null}
       </section>
-      <section className="quick-session" aria-label="当前会话摘要">
-        <div className="quick-session-title">
-          <span>当前会话</span>
-          <strong>{summary?.active_session_title || "Unavailable"}</strong>
-        </div>
-        <div className="quick-model">
-          {summary?.active_app || "Unavailable"} ·{" "}
-          {summary?.model || "Unavailable"}
-        </div>
-        <div className="quick-metrics">
-          <QuickMetric
-            label="输入"
-            value={formatTokens(summary?.session_input_tokens)}
-          />
-          <QuickMetric
-            label="缓存读取"
-            value={formatTokens(summary?.session_cache_read_tokens)}
-          />
-          <QuickMetric
-            label="输出"
-            value={formatTokens(summary?.session_output_tokens)}
-          />
-          <QuickMetric
-            label="缓存命中率"
-            value={formatPercent(summary?.session_cache_hit_rate ?? null)}
-          />
-        </div>
-      </section>
-      {summary?.quota_summary ? (
-        <p className="quick-note">
-          官方额度：{formatPercent(summary.quota_summary.used_percent)} 已用 ·{" "}
-          {summary.quota_summary.precision}
-        </p>
-      ) : (
-        <p className="quick-note">官方额度 Unavailable</p>
-      )}
-      {summary?.latest_warning ? (
-        <p className="notice notice-warning">{summary.latest_warning}</p>
-      ) : null}
     </main>
   );
 }

@@ -1,0 +1,2 @@
+{"type":"session_meta","timestamp":"2026-07-25T12:00:00Z","payload":{"id":"indexed-session","session_id":"indexed-session","cwd":"/sanitized/indexed-project","model":"gpt-5-codex"}}
+{"type":"response.completed","timestamp":"2026-07-25T12:00:01Z","payload":{"session_id":"indexed-session","request_id":"indexed-request","response_id":"indexed-response","model":"gpt-5-codex","usage":{"input_tokens":24,"output_tokens":8}}}

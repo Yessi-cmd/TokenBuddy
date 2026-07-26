@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{Ipv4Addr, Ipv6Addr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -12,8 +12,10 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use tokenbuddy_claude_session::ClaudeSessionAdapter;
 use tokenbuddy_codex_session::CodexSessionAdapter;
 use tokenbuddy_core::Core;
+use tokenbuddy_domain::{AppKind, PrecisionLevel, UsageFilters};
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
@@ -21,29 +23,55 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 pub struct LocalWebApiStatus {
     pub running: bool,
     pub url: Option<String>,
+    pub loopback_urls: Vec<String>,
 }
 
 pub struct LocalWebServer {
     url: String,
+    loopback_urls: Vec<String>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
+pub type AutostartCallback = Arc<dyn Fn(bool) -> Result<(), String> + Send + Sync>;
+
 impl LocalWebServer {
+    #[cfg(test)]
     pub fn start(core: Arc<Core>, static_root: PathBuf) -> io::Result<Self> {
-        // Bind explicitly to IPv4 loopback. This keeps the optional dashboard
-        // inaccessible from the LAN; the server never binds 0.0.0.0.
-        let listener = TcpListener::bind(("127.0.0.1", 0))?;
-        listener.set_nonblocking(true)?;
-        let port = listener.local_addr()?.port();
+        Self::start_with_autostart(core, static_root, None)
+    }
+
+    pub fn start_with_autostart(
+        core: Arc<Core>,
+        static_root: PathBuf,
+        autostart: Option<AutostartCallback>,
+    ) -> io::Result<Self> {
+        // Bind both loopback families explicitly. This keeps the optional
+        // dashboard inaccessible from the LAN while supporting clients that
+        // resolve localhost to either address family.
+        let ipv4_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let port = ipv4_listener.local_addr()?.port();
+        let ipv6_listener = TcpListener::bind((Ipv6Addr::LOCALHOST, port))?;
+        ipv4_listener.set_nonblocking(true)?;
+        ipv6_listener.set_nonblocking(true)?;
         let url = format!("http://127.0.0.1:{port}");
+        let loopback_urls = vec![url.clone(), format!("http://[::1]:{port}")];
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let worker = thread::Builder::new()
             .name("tokenbuddy-web-api".to_owned())
-            .spawn(move || serve(listener, core, static_root, thread_stop))?;
+            .spawn(move || {
+                serve(
+                    vec![ipv4_listener, ipv6_listener],
+                    core,
+                    static_root,
+                    thread_stop,
+                    autostart,
+                )
+            })?;
         Ok(Self {
             url,
+            loopback_urls,
             stop,
             worker: Some(worker),
         })
@@ -53,6 +81,7 @@ impl LocalWebServer {
         LocalWebApiStatus {
             running: true,
             url: Some(self.url.clone()),
+            loopback_urls: self.loopback_urls.clone(),
         }
     }
 }
@@ -76,27 +105,50 @@ struct Request {
 #[derive(Debug, Deserialize)]
 struct RescanRequest {
     codex_home: Option<String>,
+    claude_home: Option<String>,
 }
 
-fn serve(listener: TcpListener, core: Arc<Core>, static_root: PathBuf, stop: Arc<AtomicBool>) {
+#[derive(Debug, Deserialize)]
+struct ExportRequest {
+    format: String,
+    filters: Option<UsageFilters>,
+}
+
+fn serve(
+    listeners: Vec<TcpListener>,
+    core: Arc<Core>,
+    static_root: PathBuf,
+    stop: Arc<AtomicBool>,
+    autostart: Option<AutostartCallback>,
+) {
     while !stop.load(Ordering::SeqCst) {
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                let _ = handle_connection(&mut stream, &core, &static_root);
+        let mut accepted = false;
+        for listener in &listeners {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    accepted = true;
+                    let _ = handle_connection(&mut stream, &core, &static_root, autostart.as_ref());
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => return,
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(15));
-            }
-            Err(_) => break,
+        }
+        if !accepted {
+            thread::sleep(Duration::from_millis(5));
         }
     }
 }
 
-fn handle_connection(stream: &mut TcpStream, core: &Core, static_root: &Path) -> io::Result<()> {
+fn handle_connection(
+    stream: &mut TcpStream,
+    core: &Core,
+    static_root: &Path,
+    autostart: Option<&AutostartCallback>,
+) -> io::Result<()> {
     let Some(request) = read_request(stream)? else {
         return Ok(());
     };
-    let response = route_request(&request, core, static_root);
+    let response = route_request_with_autostart(&request, core, static_root, autostart);
     stream.write_all(&response)?;
     stream.flush()
 }
@@ -157,7 +209,17 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
     }))
 }
 
+#[cfg(test)]
 fn route_request(request: &Request, core: &Core, static_root: &Path) -> Vec<u8> {
+    route_request_with_autostart(request, core, static_root, None)
+}
+
+fn route_request_with_autostart(
+    request: &Request,
+    core: &Core,
+    static_root: &Path,
+    autostart: Option<&AutostartCallback>,
+) -> Vec<u8> {
     let (path, query) = request
         .target
         .split_once('?')
@@ -168,11 +230,25 @@ fn route_request(request: &Request, core: &Core, static_root: &Path) -> Vec<u8> 
             .quick_summary()
             .map_or_else(api_error, |summary| json_response(200, &summary)),
         ("GET", "/api/dashboard-summary") => core
-            .today_dashboard_summary()
+            .dashboard_summary_filtered(usage_filters_from_query(query))
             .map_or_else(api_error, |summary| json_response(200, &summary)),
         ("GET", "/api/sources") => core
             .list_sources()
             .map_or_else(api_error, |sources| json_response(200, &sources)),
+        ("GET", "/api/providers") => core
+            .list_providers()
+            .map_or_else(api_error, |providers| json_response(200, &providers)),
+        ("GET", "/api/quotas") => {
+            let account_id = query_value(query, "account_id");
+            let limit = query_value(query, "limit")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(100);
+            core.list_quota_snapshots(account_id.as_deref(), limit)
+                .map_or_else(api_error, |quotas| json_response(200, &quotas))
+        }
+        ("GET", "/api/settings") => core
+            .get_app_settings()
+            .map_or_else(api_error, |settings| json_response(200, &settings)),
         ("GET", "/api/detect-codex") => {
             let detection = query_value(query, "codex_home")
                 .filter(|value| !value.trim().is_empty())
@@ -182,6 +258,18 @@ fn route_request(request: &Request, core: &Core, static_root: &Path) -> Vec<u8> 
                 Some(Err(error)) => api_error(error.to_string()),
                 None => core
                     .detect_codex_path()
+                    .map_or_else(api_error, |result| json_response(200, &result)),
+            }
+        }
+        ("GET", "/api/detect-claude") => {
+            let detection = query_value(query, "claude_home")
+                .filter(|value| !value.trim().is_empty())
+                .map(|path| ClaudeSessionAdapter::new(path).detect_sync());
+            match detection {
+                Some(Ok(result)) => json_response(200, &result),
+                Some(Err(error)) => api_error(error.to_string()),
+                None => core
+                    .detect_claude_path()
                     .map_or_else(api_error, |result| json_response(200, &result)),
             }
         }
@@ -204,9 +292,20 @@ fn route_request(request: &Request, core: &Core, static_root: &Path) -> Vec<u8> 
             let offset = query_value(query, "offset")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0);
-            core.list_usage_events(session_id.as_deref(), limit, offset)
-                .map_or_else(api_error, |events| json_response(200, &events))
+            core.list_usage_events_filtered(
+                session_id.as_deref(),
+                limit,
+                offset,
+                &usage_filters_from_query(query),
+            )
+            .map_or_else(api_error, |events| json_response(200, &events))
         }
+        ("POST", "/api/export") => match serde_json::from_slice::<ExportRequest>(&request.body) {
+            Ok(body) => core
+                .export_usage(&body.format, &body.filters.unwrap_or_default())
+                .map_or_else(api_error, |export| json_response(200, &export)),
+            Err(error) => api_error(format!("invalid export request: {error}")),
+        },
         ("POST", "/api/rescan-codex") => {
             let body = serde_json::from_slice::<RescanRequest>(&request.body);
             match body {
@@ -214,6 +313,36 @@ fn route_request(request: &Request, core: &Core, static_root: &Path) -> Vec<u8> 
                     .rescan_codex(normalize_path(body.codex_home))
                     .map_or_else(api_error, |report| json_response(200, &report)),
                 Err(error) => api_error(format!("invalid rescan request: {error}")),
+            }
+        }
+        ("POST", "/api/rescan-claude") => {
+            let body = serde_json::from_slice::<RescanRequest>(&request.body);
+            match body {
+                Ok(body) => core
+                    .rescan_claude(normalize_path(body.claude_home))
+                    .map_or_else(api_error, |report| json_response(200, &report)),
+                Err(error) => api_error(format!("invalid rescan request: {error}")),
+            }
+        }
+        ("PUT", "/api/settings") | ("POST", "/api/settings") => {
+            match serde_json::from_slice::<tokenbuddy_domain::AppSettings>(&request.body) {
+                Ok(settings) => match core.get_app_settings() {
+                    Ok(previous) => match core.update_app_settings(settings.clone()) {
+                        Ok(()) => {
+                            if previous.auto_start != settings.auto_start
+                                && let Some(callback) = autostart
+                                && let Err(error) = callback(settings.auto_start)
+                            {
+                                return api_error(error);
+                            }
+                            core.get_app_settings()
+                                .map_or_else(api_error, |settings| json_response(200, &settings))
+                        }
+                        Err(error) => api_error(error),
+                    },
+                    Err(error) => api_error(error),
+                },
+                Err(error) => api_error(format!("invalid settings request: {error}")),
             }
         }
         ("GET", path) if path.starts_with("/api/sessions/") => {
@@ -307,6 +436,38 @@ fn query_value(query: &str, key: &str) -> Option<String> {
     })
 }
 
+fn usage_filters_from_query(query: &str) -> UsageFilters {
+    UsageFilters {
+        period_start: query_value(query, "period_start").and_then(|value| parse_datetime(&value)),
+        period_end: query_value(query, "period_end").and_then(|value| parse_datetime(&value)),
+        app: query_value(query, "app").and_then(|value| match value.as_str() {
+            "codex" => Some(AppKind::Codex),
+            "claude_code" => Some(AppKind::ClaudeCode),
+            "unknown" => Some(AppKind::Unknown),
+            _ => None,
+        }),
+        provider_id: query_value(query, "provider_id"),
+        account_id: query_value(query, "account_id"),
+        model: query_value(query, "model"),
+        project_path: query_value(query, "project_path"),
+        precision: query_value(query, "precision").and_then(|value| match value.as_str() {
+            "verified" => Some(PrecisionLevel::Verified),
+            "exact_session" => Some(PrecisionLevel::ExactSession),
+            "correlated" => Some(PrecisionLevel::Correlated),
+            "estimated" => Some(PrecisionLevel::Estimated),
+            "unavailable" => Some(PrecisionLevel::Unavailable),
+            _ => None,
+        }),
+        search: query_value(query, "search"),
+    }
+}
+
+fn parse_datetime(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.with_timezone(&chrono::Utc))
+}
+
 fn normalize_path(path: Option<String>) -> Option<PathBuf> {
     path.filter(|value| !value.trim().is_empty())
         .map(|value| PathBuf::from(value.trim()))
@@ -348,11 +509,12 @@ fn hex_value(value: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         io::{Read, Write},
-        net::TcpStream,
+        net::{Ipv6Addr, TcpStream},
         path::PathBuf,
         sync::Arc,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use tempfile::tempdir;
@@ -374,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn local_api_serves_core_data_over_ipv4_loopback() {
+    fn local_api_serves_core_data_over_both_loopback_families() {
         let database = tempdir().expect("database directory");
         let mut config = CoreConfig::new(database.path().join("tokenbuddy.sqlite3"), None);
         config.poll_interval = Duration::from_millis(10);
@@ -388,17 +550,209 @@ mod tests {
             .expect("port")
             .parse::<u16>()
             .expect("valid port");
-        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("loopback connection");
-        stream
-            .write_all(
-                b"GET /api/quick-summary HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-            )
-            .expect("request");
-        let mut response = String::new();
-        stream.read_to_string(&mut response).expect("response");
-        assert!(response.starts_with("HTTP/1.1 200 OK"));
-        assert!(response.contains("\"collection_status\":\"idle\""));
+        assert_eq!(server.status().loopback_urls.len(), 2);
+        let request =
+            b"GET /api/quick-summary HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let mut ipv4_stream = TcpStream::connect(("127.0.0.1", port)).expect("IPv4 loopback");
+        ipv4_stream.write_all(request).expect("IPv4 request");
+        let mut ipv4_response = String::new();
+        ipv4_stream
+            .read_to_string(&mut ipv4_response)
+            .expect("IPv4 response");
+
+        let mut ipv6_stream =
+            TcpStream::connect((Ipv6Addr::LOCALHOST, port)).expect("IPv6 loopback");
+        ipv6_stream.write_all(request).expect("IPv6 request");
+        let mut ipv6_response = String::new();
+        ipv6_stream
+            .read_to_string(&mut ipv6_response)
+            .expect("IPv6 response");
+
+        assert!(ipv4_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(ipv6_response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(response_body(&ipv4_response), response_body(&ipv6_response));
+        assert!(ipv4_response.contains("\"collection_status\":\"idle\""));
         drop(server);
         core.shutdown().expect("core stops");
+    }
+
+    #[test]
+    fn web_entrypoint_matches_the_core_query_contract() {
+        let database = tempdir().expect("database directory");
+        let core = Core::start(CoreConfig::new(
+            database.path().join("tokenbuddy.sqlite3"),
+            None,
+        ))
+        .expect("core starts");
+        let response = super::route_request(
+            &super::Request {
+                method: "GET".to_owned(),
+                target: "/api/quick-summary".to_owned(),
+                body: Vec::new(),
+            },
+            &core,
+            PathBuf::from("/missing").as_path(),
+        );
+        let response = String::from_utf8(response).expect("UTF-8 response");
+        let web_summary: tokenbuddy_domain::QuickSummary =
+            serde_json::from_str(response_body(&response)).expect("summary JSON");
+        assert_eq!(web_summary, core.quick_summary().expect("core summary"));
+        core.shutdown().expect("core stops");
+    }
+
+    #[test]
+    fn shared_read_routes_return_core_owned_data_for_all_phase_four_b_views() {
+        let database = tempdir().expect("database directory");
+        let core = Core::start(CoreConfig::new(
+            database.path().join("tokenbuddy.sqlite3"),
+            None,
+        ))
+        .expect("core starts");
+        for target in ["/api/providers", "/api/quotas", "/api/settings"] {
+            let response = super::route_request(
+                &super::Request {
+                    method: "GET".to_owned(),
+                    target: target.to_owned(),
+                    body: Vec::new(),
+                },
+                &core,
+                PathBuf::from("/missing").as_path(),
+            );
+            let response = String::from_utf8(response).expect("UTF-8 response");
+            assert!(response.starts_with("HTTP/1.1 200 OK"), "{target}");
+        }
+        core.shutdown().expect("core stops");
+    }
+
+    #[test]
+    fn local_api_exposes_claude_detection_and_rescan() {
+        let database = tempdir().expect("database directory");
+        let claude_home = tempdir().expect("Claude home");
+        fs::create_dir_all(claude_home.path().join("projects")).expect("projects directory");
+        let core = Core::start(CoreConfig::new(
+            database.path().join("tokenbuddy.sqlite3"),
+            None,
+        ))
+        .expect("core starts");
+        let path = claude_home.path().to_string_lossy();
+        let response = super::route_request(
+            &super::Request {
+                method: "GET".to_owned(),
+                target: format!("/api/detect-claude?claude_home={path}"),
+                body: Vec::new(),
+            },
+            &core,
+            PathBuf::from("/missing").as_path(),
+        );
+        let response = String::from_utf8(response).expect("detection response");
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("claude-code-session"));
+        assert!(response.contains("\"detected\":true"));
+
+        let response = super::route_request(
+            &super::Request {
+                method: "POST".to_owned(),
+                target: "/api/rescan-claude".to_owned(),
+                body: serde_json::to_vec(&serde_json::json!({
+                    "claude_home": path.as_ref(),
+                }))
+                .expect("rescan JSON"),
+            },
+            &core,
+            PathBuf::from("/missing").as_path(),
+        );
+        let response = String::from_utf8(response).expect("rescan response");
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert_eq!(
+            core.get_app_settings()
+                .expect("settings")
+                .claude_home
+                .as_deref(),
+            Some(path.as_ref())
+        );
+        core.shutdown().expect("core stops");
+    }
+
+    #[test]
+    fn dashboard_filters_and_export_use_the_same_local_api_contract() {
+        let database = tempdir().expect("database directory");
+        let core = Core::start(CoreConfig::new(
+            database.path().join("tokenbuddy.sqlite3"),
+            None,
+        ))
+        .expect("core starts");
+        let dashboard_response = super::route_request(
+            &super::Request {
+                method: "GET".to_owned(),
+                target: "/api/dashboard-summary?app=codex&precision=verified".to_owned(),
+                body: Vec::new(),
+            },
+            &core,
+            PathBuf::from("/missing").as_path(),
+        );
+        assert!(
+            String::from_utf8(dashboard_response)
+                .expect("dashboard response")
+                .starts_with("HTTP/1.1 200 OK")
+        );
+
+        let export_response = super::route_request(
+            &super::Request {
+                method: "POST".to_owned(),
+                target: "/api/export".to_owned(),
+                body: br#"{"format":"csv","filters":{"app":"codex"}}"#.to_vec(),
+            },
+            &core,
+            PathBuf::from("/missing").as_path(),
+        );
+        let export_response = String::from_utf8(export_response).expect("export response");
+        assert!(export_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(export_response.contains("id,occurred_at,app"));
+        core.shutdown().expect("core stops");
+    }
+
+    #[test]
+    fn quick_summary_http_p95_stays_within_lightweight_entry_budget() {
+        let database = tempdir().expect("database directory");
+        let core = Core::start(CoreConfig::new(
+            database.path().join("tokenbuddy.sqlite3"),
+            None,
+        ))
+        .expect("core starts");
+        let server = LocalWebServer::start(Arc::clone(&core), PathBuf::from("/missing"))
+            .expect("web server starts");
+        let url = server.status().url.expect("server URL");
+        let port = url
+            .rsplit(':')
+            .next()
+            .expect("port")
+            .parse::<u16>()
+            .expect("valid port");
+        let request =
+            b"GET /api/quick-summary HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let mut samples = (0..50)
+            .map(|_| {
+                let started = Instant::now();
+                let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("loopback");
+                stream.write_all(request).expect("request");
+                let mut response = String::new();
+                stream.read_to_string(&mut response).expect("response");
+                assert!(response.starts_with("HTTP/1.1 200 OK"));
+                started.elapsed()
+            })
+            .collect::<Vec<_>>();
+        samples.sort_unstable();
+        let p95 = samples[((samples.len() * 95).div_ceil(100)).saturating_sub(1)];
+        println!("QuickSummary HTTP P95: {} ms", p95.as_secs_f64() * 1_000.0);
+        assert!(p95 < Duration::from_millis(200));
+        drop(server);
+        core.shutdown().expect("core stops");
+    }
+
+    fn response_body(response: &str) -> &str {
+        response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("HTTP response body")
     }
 }

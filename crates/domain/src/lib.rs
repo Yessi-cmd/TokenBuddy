@@ -159,7 +159,9 @@ pub struct QuotaSummary {
 pub struct QuickSummary {
     pub collection_status: CollectionStatus,
     pub active_app: Option<AppKind>,
+    pub active_session_id: Option<String>,
     pub active_session_title: Option<String>,
+    pub active_project_path: Option<String>,
     pub provider_name: Option<String>,
     pub model: Option<String>,
     pub session_input_tokens: Option<u64>,
@@ -176,7 +178,9 @@ impl QuickSummary {
         Self {
             collection_status: CollectionStatus::Starting,
             active_app: None,
+            active_session_id: None,
             active_session_title: None,
+            active_project_path: None,
             provider_name: None,
             model: None,
             session_input_tokens: None,
@@ -314,6 +318,71 @@ pub struct SourceRecord {
     pub last_error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderSummary {
+    pub id: String,
+    pub provider_family: String,
+    pub display_name: String,
+    pub upstream_url: Option<String>,
+    pub launcher: Option<LauncherKind>,
+    pub source_id: Option<String>,
+    pub account_count: u64,
+    pub request_count: u64,
+    pub successful_request_count: Option<u64>,
+    pub success_rate_percent: Option<f64>,
+    pub average_latency_ms: Option<f64>,
+    pub totals: UsageTotals,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuotaSnapshot {
+    pub id: String,
+    pub account_id: String,
+    pub account_name: Option<String>,
+    pub provider_name: Option<String>,
+    pub captured_at: DateTime<Utc>,
+    pub window_type: String,
+    pub used_percent: Option<f64>,
+    pub remaining_percent: Option<f64>,
+    pub reset_at: Option<DateTime<Utc>>,
+    pub credits_remaining: Option<f64>,
+    pub precision: PrecisionLevel,
+    pub raw_json: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AppSettings {
+    pub codex_home: Option<String>,
+    pub claude_home: Option<String>,
+    pub cc_switch_db_path: Option<String>,
+    pub cockpit_path: Option<String>,
+    pub otel_port: Option<u16>,
+    pub auto_start: bool,
+    pub proxy_enabled: bool,
+    pub save_request_metadata: bool,
+    pub data_retention_days: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct UsageFilters {
+    pub period_start: Option<DateTime<Utc>>,
+    pub period_end: Option<DateTime<Utc>>,
+    pub app: Option<AppKind>,
+    pub provider_id: Option<String>,
+    pub account_id: Option<String>,
+    pub model: Option<String>,
+    pub project_path: Option<String>,
+    pub precision: Option<PrecisionLevel>,
+    pub search: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExportResult {
+    pub filename: String,
+    pub mime_type: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

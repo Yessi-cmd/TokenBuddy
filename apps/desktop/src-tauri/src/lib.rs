@@ -5,27 +5,32 @@ use std::{
     process::Command,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    thread,
+    time::Duration as StdDuration,
 };
 
-use chrono::{Datelike, Duration, TimeZone, Utc};
 use tauri::{
-    App, AppHandle, Manager, Runtime, State, WindowEvent,
+    App, AppHandle, Manager, PhysicalPosition, PhysicalSize, Rect, Runtime, State, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
     menu::{MenuBuilder, MenuEvent},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+use tokenbuddy_claude_session::{ClaudeSessionAdapter, default_claude_home};
 use tokenbuddy_codex_session::{CodexSessionAdapter, default_codex_home};
 use tokenbuddy_core::{Core, CoreConfig, CoreError, ImportReport};
 use tokenbuddy_domain::{
-    DashboardSummary, DetectionResult, QuickSummary, SessionDetail, SessionPage,
+    AppSettings, DashboardSummary, DetectionResult, ExportResult, QuickSummary, SessionDetail,
+    SessionPage, UsageFilters,
 };
-use web::{LocalWebApiStatus, LocalWebServer};
+use web::{AutostartCallback, LocalWebApiStatus, LocalWebServer};
 
 struct AppState {
     core: Arc<Core>,
     web_server: Mutex<Option<LocalWebServer>>,
     quitting: AtomicBool,
+    quick_hide_generation: AtomicU64,
 }
 
 #[tauri::command]
@@ -41,11 +46,13 @@ fn get_quick_summary(
 }
 
 #[tauri::command]
-fn get_dashboard_summary(state: State<'_, AppState>) -> Result<DashboardSummary, String> {
-    let (period_start, period_end) = today_period()?;
+fn get_dashboard_summary(
+    state: State<'_, AppState>,
+    filters: Option<UsageFilters>,
+) -> Result<DashboardSummary, String> {
     state
         .core
-        .dashboard_summary(period_start, period_end)
+        .dashboard_summary_filtered(filters.unwrap_or_default())
         .map_err(core_error)
 }
 
@@ -98,6 +105,59 @@ fn list_sources(
 }
 
 #[tauri::command]
+fn list_providers(
+    state: State<'_, AppState>,
+) -> Result<Vec<tokenbuddy_domain::ProviderSummary>, String> {
+    state.core.list_providers().map_err(core_error)
+}
+
+#[tauri::command]
+fn list_quota_snapshots(
+    state: State<'_, AppState>,
+    account_id: Option<String>,
+    limit: Option<u64>,
+) -> Result<Vec<tokenbuddy_domain::QuotaSnapshot>, String> {
+    state
+        .core
+        .list_quota_snapshots(account_id.as_deref(), limit.unwrap_or(100))
+        .map_err(core_error)
+}
+
+#[tauri::command]
+fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    state.core.get_app_settings().map_err(core_error)
+}
+
+#[tauri::command]
+fn update_app_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
+    let previous = state.core.get_app_settings().map_err(core_error)?;
+    state
+        .core
+        .update_app_settings(settings.clone())
+        .map_err(core_error)?;
+    if previous.auto_start != settings.auto_start {
+        sync_autostart(&app, settings.auto_start)?;
+    }
+    state.core.get_app_settings().map_err(core_error)
+}
+
+#[tauri::command]
+fn export_usage(
+    state: State<'_, AppState>,
+    format: String,
+    filters: Option<UsageFilters>,
+) -> Result<ExportResult, String> {
+    state
+        .core
+        .export_usage(&format, &filters.unwrap_or_default())
+        .map_err(core_error)
+}
+
+#[tauri::command]
 fn detect_codex_path(
     state: State<'_, AppState>,
     codex_home: Option<String>,
@@ -122,6 +182,30 @@ fn rescan_codex(
 }
 
 #[tauri::command]
+fn detect_claude_path(
+    state: State<'_, AppState>,
+    claude_home: Option<String>,
+) -> Result<DetectionResult, String> {
+    if let Some(home) = normalized_path(claude_home) {
+        return ClaudeSessionAdapter::new(home)
+            .detect_sync()
+            .map_err(|error| error.to_string());
+    }
+    state.core.detect_claude_path().map_err(core_error)
+}
+
+#[tauri::command]
+fn rescan_claude(
+    state: State<'_, AppState>,
+    claude_home: Option<String>,
+) -> Result<ImportReport, String> {
+    state
+        .core
+        .rescan_claude(normalized_path(claude_home))
+        .map_err(core_error)
+}
+
+#[tauri::command]
 fn start_local_web_api(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -135,7 +219,7 @@ fn start_local_web_api(
     }
 
     let static_root = resolve_web_root(&app);
-    let server = LocalWebServer::start(Arc::clone(&state.core), static_root)
+    let server = start_local_web_server(&app, Arc::clone(&state.core), static_root)
         .map_err(|error| format!("无法启动本地网页服务：{error}"))?;
     let status = server.status();
     *web_server = Some(server);
@@ -152,6 +236,7 @@ fn stop_local_web_api(state: State<'_, AppState>) -> Result<LocalWebApiStatus, S
     Ok(LocalWebApiStatus {
         running: false,
         url: None,
+        loopback_urls: Vec::new(),
     })
 }
 
@@ -165,6 +250,7 @@ fn get_local_web_api_status(state: State<'_, AppState>) -> Result<LocalWebApiSta
         LocalWebApiStatus {
             running: false,
             url: None,
+            loopback_urls: Vec::new(),
         },
         LocalWebServer::status,
     ))
@@ -212,6 +298,17 @@ fn resolve_web_root<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     development_root
 }
 
+fn start_local_web_server<R: Runtime>(
+    app: &AppHandle<R>,
+    core: Arc<Core>,
+    static_root: PathBuf,
+) -> std::io::Result<LocalWebServer> {
+    let callback_app = app.clone();
+    let autostart: AutostartCallback =
+        Arc::new(move |enabled| sync_autostart(&callback_app, enabled));
+    LocalWebServer::start_with_autostart(core, static_root, Some(autostart))
+}
+
 fn open_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let result = Command::new("open").arg(url).status();
@@ -228,17 +325,71 @@ fn core_error(error: CoreError) -> String {
     error.to_string()
 }
 
-fn today_period() -> Result<(chrono::DateTime<Utc>, chrono::DateTime<Utc>), String> {
-    let now = Utc::now();
-    let start = Utc
-        .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
-        .single()
-        .ok_or_else(|| "无法计算今日统计窗口".to_owned())?;
-    Ok((start, start + Duration::days(1)))
+fn sync_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+
+    let manager = app.autolaunch();
+    if enabled {
+        manager
+            .enable()
+            .map_err(|error| format!("无法启用开机启动：{error}"))
+    } else {
+        manager
+            .disable()
+            .map_err(|error| format!("无法关闭开机启动：{error}"))
+    }
 }
 
 fn show_window<R: Runtime>(app: &AppHandle<R>, label: &str) {
+    if let Some(window) = get_or_create_window(app, label) {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn get_or_create_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> Option<WebviewWindow<R>> {
     if let Some(window) = app.get_webview_window(label) {
+        return Some(window);
+    }
+
+    let result = match label {
+        "main" => WebviewWindowBuilder::new(app, "main", WebviewUrl::App("/dashboard".into()))
+            .title("TokenBuddy")
+            .inner_size(1100.0, 720.0)
+            .min_inner_size(860.0, 600.0)
+            .resizable(true)
+            .visible(false)
+            .build(),
+        "quick" => WebviewWindowBuilder::new(app, "quick", WebviewUrl::App("/quick".into()))
+            .title("TokenBuddy QuickSummary")
+            .inner_size(360.0, 540.0)
+            .min_inner_size(320.0, 540.0)
+            .decorations(false)
+            .resizable(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(false)
+            .build(),
+        _ => return None,
+    };
+    result.ok()
+}
+
+fn tray_rect<R: Runtime>(app: &AppHandle<R>) -> Option<Rect> {
+    app.tray_by_id("main")
+        .and_then(|tray| tray.rect().ok().flatten())
+}
+
+fn show_quick_window<R: Runtime>(app: &AppHandle<R>) {
+    show_quick_window_at(app, tray_rect(app));
+}
+
+fn show_quick_window_at<R: Runtime>(app: &AppHandle<R>, anchor: Option<Rect>) {
+    cancel_scheduled_quick_hide(app);
+    if let Some(window) = get_or_create_window(app, "quick") {
+        if let Some(anchor) = anchor {
+            position_quick_window(app, &window, anchor);
+        }
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -250,16 +401,107 @@ fn hide_window<R: Runtime>(app: &AppHandle<R>, label: &str) {
     }
 }
 
+fn toggle_quick_window<R: Runtime>(app: &AppHandle<R>, anchor: Rect) {
+    cancel_scheduled_quick_hide(app);
+    if let Some(window) = get_or_create_window(app, "quick") {
+        if next_window_visible(window.is_visible().unwrap_or(false)) {
+            show_quick_window_at(app, Some(anchor));
+        } else {
+            let _ = window.hide();
+        }
+    }
+}
+
+fn schedule_quick_window_hide<R: Runtime>(app: &AppHandle<R>) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let generation = state.quick_hide_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let callback_app = app.clone();
+    let main_thread_app = callback_app.clone();
+    thread::spawn(move || {
+        thread::sleep(StdDuration::from_millis(120));
+        let _ = callback_app.run_on_main_thread(move || {
+            let Some(state) = main_thread_app.try_state::<AppState>() else {
+                return;
+            };
+            if state.quick_hide_generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            if let Some(window) = main_thread_app.get_webview_window("quick")
+                && !window.is_focused().unwrap_or(true)
+            {
+                let _ = window.hide();
+            }
+        });
+    });
+}
+
+fn cancel_scheduled_quick_hide<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.quick_hide_generation.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn should_dismiss_quick_window(label: &str, focused: bool, quitting: bool) -> bool {
+    label == "quick" && !focused && !quitting
+}
+
+fn next_window_visible(is_visible: bool) -> bool {
+    !is_visible
+}
+
+fn position_quick_window<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>, anchor: Rect) {
+    let scale_factor = window.scale_factor().unwrap_or(1.0);
+    let anchor_position = anchor.position.to_physical::<i32>(scale_factor);
+    let anchor_size = anchor.size.to_physical::<u32>(scale_factor);
+    let panel_size = window
+        .outer_size()
+        .unwrap_or_else(|_| PhysicalSize::new(360, 540));
+    let origin = popover_origin(anchor_position, anchor_size, panel_size);
+    let mut x = origin.x;
+    let mut y = origin.y;
+
+    if let Ok(Some(monitor)) =
+        app.monitor_from_point(f64::from(anchor_position.x), f64::from(anchor_position.y))
+    {
+        let work_area = monitor.work_area();
+        let margin = 8;
+        let work_width = i32::try_from(work_area.size.width).unwrap_or(i32::MAX);
+        let work_height = i32::try_from(work_area.size.height).unwrap_or(i32::MAX);
+        let panel_width = i32::try_from(panel_size.width).unwrap_or(i32::MAX);
+        let panel_height = i32::try_from(panel_size.height).unwrap_or(i32::MAX);
+        let left = work_area.position.x + margin;
+        let top = work_area.position.y + margin;
+        let right = work_area.position.x + work_width - panel_width - margin;
+        let bottom = work_area.position.y + work_height - panel_height - margin;
+        x = x.clamp(left, right.max(left));
+        y = y.clamp(top, bottom.max(top));
+    }
+
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+fn popover_origin(
+    anchor_position: PhysicalPosition<i32>,
+    anchor_size: PhysicalSize<u32>,
+    panel_size: PhysicalSize<u32>,
+) -> PhysicalPosition<i32> {
+    let anchor_width = i32::try_from(anchor_size.width).unwrap_or(i32::MAX);
+    let panel_width = i32::try_from(panel_size.width).unwrap_or(i32::MAX);
+    #[cfg(target_os = "windows")]
+    let panel_height = i32::try_from(panel_size.height).unwrap_or(i32::MAX);
+    let x = anchor_position.x + (anchor_width - panel_width) / 2;
+    #[cfg(target_os = "windows")]
+    let y = anchor_position.y - panel_height - 8;
+    #[cfg(not(target_os = "windows"))]
+    let y = anchor_position.y + i32::try_from(anchor_size.height).unwrap_or(i32::MAX) + 8;
+    PhysicalPosition::new(x, y)
+}
+
 fn update_tray_summary<R: Runtime>(app: &AppHandle<R>, summary: &QuickSummary) {
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_tooltip(Some(tray_tooltip(summary)));
-        #[cfg(target_os = "macos")]
-        {
-            let today = summary
-                .today_total_tokens
-                .map_or_else(|| "Unavailable".to_owned(), |value| value.to_string());
-            let _ = tray.set_title(Some(format!("Today {today}")));
-        }
     }
 }
 
@@ -276,7 +518,7 @@ fn tray_tooltip(summary: &QuickSummary) -> String {
 
 fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
     match event.id().as_ref() {
-        "open-quick" => show_window(app, "quick"),
+        "open-quick" => show_quick_window(app),
         "open-dashboard" => show_window(app, "main"),
         "open-web" => {
             if let Some(state) = app.try_state::<AppState>()
@@ -284,7 +526,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
             {
                 if server.is_none() {
                     if let Ok(web) =
-                        LocalWebServer::start(Arc::clone(&state.core), resolve_web_root(app))
+                        start_local_web_server(app, Arc::clone(&state.core), resolve_web_root(app))
                     {
                         let url = web.status().url.clone();
                         *server = Some(web);
@@ -300,6 +542,7 @@ fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
         "rescan" => {
             if let Some(state) = app.try_state::<AppState>() {
                 let _ = state.core.rescan_codex(None);
+                let _ = state.core.rescan_claude(None);
             }
         }
         "quit" => {
@@ -318,8 +561,9 @@ fn handle_tray_event<R: Runtime>(tray: &tauri::tray::TrayIcon<R>, event: TrayIco
         TrayIconEvent::Click {
             button: MouseButton::Left,
             button_state: MouseButtonState::Up,
+            rect,
             ..
-        } => show_window(tray.app_handle(), "quick"),
+        } => toggle_quick_window(tray.app_handle(), rect),
         TrayIconEvent::DoubleClick {
             button: MouseButton::Left,
             ..
@@ -334,7 +578,7 @@ fn setup_tray<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
         .text("open-quick", "打开快速摘要")
         .text("open-dashboard", "打开完整面板")
         .text("open-web", "打开本地网页面板")
-        .text("rescan", "立即导入 Codex")
+        .text("rescan", "立即导入 Codex + Claude")
         .separator()
         .text("quit", "退出 TokenBuddy")
         .build()?;
@@ -353,23 +597,48 @@ fn setup_tray<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
 
 pub fn run() {
     let result = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_window(app, "main");
+        }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             let database_path = app
                 .path()
                 .app_data_dir()
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?
                 .join("tokenbuddy.sqlite3");
-            let core = Core::start(CoreConfig::new(database_path, default_codex_home()))
-                .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
+            let core = Core::start(
+                CoreConfig::new(database_path, default_codex_home())
+                    .with_claude_home(default_claude_home()),
+            )
+            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
             app.manage(AppState {
                 core,
                 web_server: Mutex::new(None),
                 quitting: AtomicBool::new(false),
+                quick_hide_generation: AtomicU64::new(0),
             });
-            hide_window(app.handle(), "main");
-            hide_window(app.handle(), "quick");
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            let settings = app
+                .state::<AppState>()
+                .core
+                .get_app_settings()
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
+            if settings.auto_start
+                && let Err(error) = sync_autostart(app.handle(), true)
+            {
+                eprintln!("TokenBuddy autostart synchronization failed: {error}");
+            }
+            if debug_show_windows() {
+                show_window(app.handle(), "main");
+            } else {
+                hide_window(app.handle(), "main");
+                hide_window(app.handle(), "quick");
+                #[cfg(target_os = "macos")]
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
             setup_tray(app)?;
             let app_handle = app.handle().clone();
             let core = Arc::clone(&app.state::<AppState>().core);
@@ -387,25 +656,45 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event
-                && let Some(state) = window.try_state::<AppState>()
-                && !state.quitting.load(Ordering::SeqCst)
-                && (window.label() == "main" || window.label() == "quick")
-            {
-                api.prevent_close();
-                let _ = window.hide();
+            if let Some(state) = window.try_state::<AppState>() {
+                match event {
+                    WindowEvent::Focused(false)
+                        if should_dismiss_quick_window(
+                            window.label(),
+                            false,
+                            state.quitting.load(Ordering::SeqCst),
+                        ) =>
+                    {
+                        schedule_quick_window_hide(window.app_handle());
+                    }
+                    WindowEvent::CloseRequested { api, .. }
+                        if !state.quitting.load(Ordering::SeqCst)
+                            && (window.label() == "main" || window.label() == "quick") =>
+                    {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    _ => {}
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
             greet,
             get_quick_summary,
             get_dashboard_summary,
+            export_usage,
             list_sessions,
             get_session_detail,
             list_usage_events,
             list_sources,
+            list_providers,
+            list_quota_snapshots,
+            get_app_settings,
+            update_app_settings,
             detect_codex_path,
             rescan_codex,
+            detect_claude_path,
+            rescan_claude,
             start_local_web_api,
             stop_local_web_api,
             get_local_web_api_status,
@@ -426,11 +715,19 @@ pub fn run() {
     }
 }
 
+fn debug_show_windows() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var_os("TOKENBUDDY_DEBUG_SHOW_WINDOWS").is_some_and(|value| value == "1")
+}
+
 #[cfg(test)]
 mod tests {
-    use chrono::Timelike;
+    use tauri::{PhysicalPosition, PhysicalSize};
 
-    use super::{greet, normalized_path, today_period};
+    use super::{
+        debug_show_windows, greet, next_window_visible, normalized_path, popover_origin,
+        should_dismiss_quick_window, tray_tooltip,
+    };
 
     #[test]
     fn greeting_mentions_the_name() {
@@ -447,9 +744,60 @@ mod tests {
     }
 
     #[test]
-    fn today_period_is_a_full_utc_day() {
-        let (start, end) = today_period().expect("period");
-        assert_eq!(end - start, chrono::Duration::days(1));
-        assert_eq!(start.hour(), 0);
+    fn tray_tooltip_keeps_the_full_summary_off_the_status_bar() {
+        let summary = tokenbuddy_domain::QuickSummary {
+            collection_status: tokenbuddy_domain::CollectionStatus::Idle,
+            active_app: None,
+            active_session_id: None,
+            active_session_title: None,
+            active_project_path: None,
+            provider_name: Some("OpenAI".to_owned()),
+            model: None,
+            session_input_tokens: None,
+            session_cache_read_tokens: None,
+            session_output_tokens: None,
+            session_cache_hit_rate: None,
+            today_total_tokens: Some(60_768_325),
+            quota_summary: None,
+            latest_warning: None,
+        };
+
+        assert_eq!(
+            tray_tooltip(&summary),
+            "TokenBuddy · 今日 60768325 · idle · Provider OpenAI"
+        );
+    }
+
+    #[test]
+    fn tray_click_toggles_the_quick_panel_visibility() {
+        assert!(next_window_visible(false));
+        assert!(!next_window_visible(true));
+    }
+
+    #[test]
+    fn quick_panel_dismisses_only_when_focus_leaves_the_quick_window() {
+        assert!(should_dismiss_quick_window("quick", false, false));
+        assert!(!should_dismiss_quick_window("quick", true, false));
+        assert!(!should_dismiss_quick_window("main", false, false));
+        assert!(!should_dismiss_quick_window("quick", false, true));
+    }
+
+    #[test]
+    fn tray_popover_is_centered_on_the_anchor() {
+        let origin = popover_origin(
+            PhysicalPosition::new(1_000, 0),
+            PhysicalSize::new(22, 24),
+            PhysicalSize::new(360, 540),
+        );
+        assert_eq!(origin.x, 831);
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(origin.y, 32);
+        #[cfg(target_os = "windows")]
+        assert_eq!(origin.y, -548);
+    }
+
+    #[test]
+    fn debug_window_switch_is_opt_in() {
+        assert!(!debug_show_windows());
     }
 }

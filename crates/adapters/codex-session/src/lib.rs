@@ -26,6 +26,7 @@ use tokenbuddy_domain::{
 pub const SOURCE_ID: &str = "codex-session";
 pub const ADAPTER_TYPE: &str = "codex_session";
 pub const DISPLAY_NAME: &str = "Codex Sessions";
+const SESSION_INDEX_RESOURCE_ID: &str = "session_index.jsonl";
 
 #[derive(Debug, Error)]
 pub enum CodexAdapterError {
@@ -86,6 +87,17 @@ impl CodexSessionAdapter {
             return Err(CodexAdapterError::InvalidHome(sessions_dir));
         }
 
+        let index_snapshot = read_session_index(
+            &self.codex_home.join(SESSION_INDEX_RESOURCE_ID),
+            cursors.get(SESSION_INDEX_RESOURCE_ID),
+        );
+        let session_titles = index_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.titles.clone())
+            .unwrap_or_default();
+        let session_index_changed = index_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.changed);
         let mut files = Vec::new();
         collect_jsonl_files(&sessions_dir, &mut files)?;
         files.sort();
@@ -94,11 +106,20 @@ impl CodexSessionAdapter {
             source: Some(self.source_record("healthy")),
             ..ImportBatch::default()
         };
+        if let Some(snapshot) = index_snapshot {
+            batch.cursors.push(snapshot.cursor);
+        }
 
         for path in files {
             let resource_id = resource_id(&self.codex_home, &path);
             let cursor = cursors.get(&resource_id);
-            let parsed = self.import_file(&path, &resource_id, cursor)?;
+            let parsed = self.import_file(
+                &path,
+                &resource_id,
+                cursor,
+                &session_titles,
+                session_index_changed,
+            )?;
             batch.sessions.extend(parsed.sessions);
             batch.usage_events.extend(parsed.usage_events);
             batch.cursors.push(parsed.cursor);
@@ -144,6 +165,8 @@ impl CodexSessionAdapter {
         path: &Path,
         resource_id: &str,
         cursor: Option<&ImportCursor>,
+        session_titles: &HashMap<String, String>,
+        session_index_changed: bool,
     ) -> Result<ParsedFile, CodexAdapterError> {
         let metadata = fs::metadata(path)?;
         let file_size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
@@ -181,6 +204,14 @@ impl CodexSessionAdapter {
             .map(str::to_owned)
             .unwrap_or_else(|| resource_id.to_owned());
         let mut sessions = BTreeMap::<String, SessionRecord>::new();
+        if start_offset > 0 && session_index_changed && !session_titles.is_empty() {
+            self.import_session_metadata(
+                path,
+                &default_external_session_id,
+                session_titles,
+                &mut sessions,
+            )?;
+        }
         let mut usage_events = Vec::new();
         let mut skipped_records = 0;
         let mut offset = start_offset;
@@ -198,6 +229,7 @@ impl CodexSessionAdapter {
 
             let line_offset = offset;
             offset += bytes_read as u64;
+            let has_newline = line.ends_with(b"\n");
             let trimmed = trim_line_end(&line);
             if trimmed.is_empty() {
                 continue;
@@ -206,12 +238,25 @@ impl CodexSessionAdapter {
             let value: Value = match serde_json::from_slice(trimmed) {
                 Ok(value) => value,
                 Err(_) => {
+                    // A writer can append a JSONL record in more than one
+                    // write. Keep an incomplete final line out of the cursor
+                    // so the next import can retry it after the newline and
+                    // remaining bytes arrive.
+                    if !has_newline {
+                        offset = line_offset;
+                        break;
+                    }
                     skipped_records += 1;
                     continue;
                 }
             };
 
-            let context = parse_context(&value, &default_external_session_id, &state);
+            let mut context = parse_context(&value, &default_external_session_id, &state);
+            apply_indexed_session_context(
+                &mut context,
+                session_titles,
+                &default_external_session_id,
+            );
             if let Some(external_session_id) = &context.session_id {
                 state.current_session_id = Some(external_session_id.clone());
                 update_session(
@@ -335,6 +380,45 @@ impl CodexSessionAdapter {
         })
     }
 
+    fn import_session_metadata(
+        &self,
+        path: &Path,
+        default_external_session_id: &str,
+        session_titles: &HashMap<String, String>,
+        sessions: &mut BTreeMap<String, SessionRecord>,
+    ) -> Result<(), CodexAdapterError> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let mut state = ParseState::default();
+
+        for line in reader.lines().map_while(Result::ok) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+                continue;
+            };
+
+            let mut context = parse_context(&value, default_external_session_id, &state);
+            apply_indexed_session_context(
+                &mut context,
+                session_titles,
+                default_external_session_id,
+            );
+            if let Some(external_session_id) = &context.session_id {
+                state.current_session_id = Some(external_session_id.clone());
+                update_session(
+                    sessions,
+                    &self.session_record(external_session_id, &context),
+                    context.timestamp,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     fn session_id(&self, external_session_id: &str) -> String {
         format!("{SOURCE_ID}:{}", short_hash(external_session_id))
     }
@@ -455,22 +539,131 @@ fn resource_id(codex_home: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+#[derive(Debug)]
+struct SessionIndexSnapshot {
+    titles: HashMap<String, String>,
+    cursor: ImportCursor,
+    changed: bool,
+}
+
+fn read_session_index(
+    path: &Path,
+    previous_cursor: Option<&ImportCursor>,
+) -> Option<SessionIndexSnapshot> {
+    let bytes = fs::read(path).ok()?;
+    let metadata = fs::metadata(path).ok()?;
+    let content_hash = hash_bytes(&bytes);
+    let changed = previous_cursor.and_then(|cursor| cursor.content_hash.as_deref())
+        != Some(content_hash.as_str());
+    let mut titles = HashMap::new();
+
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if let Some((id, title)) = session_index_entry(&value) {
+            titles.insert(id, title);
+        }
+    }
+
+    Some(SessionIndexSnapshot {
+        titles,
+        cursor: ImportCursor {
+            source_id: SOURCE_ID.to_owned(),
+            resource_id: SESSION_INDEX_RESOURCE_ID.to_owned(),
+            file_size: Some(i64::try_from(metadata.len()).unwrap_or(i64::MAX)),
+            modified_at: metadata.modified().ok().map(DateTime::<Utc>::from),
+            byte_offset: i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+            content_hash: Some(content_hash),
+            last_cumulative_usage: None,
+            snapshot_generation: 0,
+            updated_at: now(),
+        },
+        changed,
+    })
+}
+
+fn session_index_entry(value: &Value) -> Option<(String, String)> {
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let title = value
+        .get("thread_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some((id.to_owned(), title.to_owned()))
+}
+
+fn indexed_session_title(
+    titles: &HashMap<String, String>,
+    session_id: Option<&str>,
+    default_external_session_id: &str,
+) -> Option<String> {
+    session_id
+        .and_then(|value| titles.get(value))
+        .or_else(|| titles.get(default_external_session_id))
+        .map(String::as_str)
+        .map(str::to_owned)
+        .or_else(|| indexed_file_title(titles, default_external_session_id))
+}
+
+fn indexed_file_title(
+    titles: &HashMap<String, String>,
+    default_external_session_id: &str,
+) -> Option<String> {
+    titles.iter().find_map(|(indexed_id, title)| {
+        (!indexed_id.is_empty() && default_external_session_id.contains(indexed_id))
+            .then(|| title.clone())
+    })
+}
+
+fn apply_indexed_session_context(
+    context: &mut ParseContext,
+    titles: &HashMap<String, String>,
+    default_external_session_id: &str,
+) {
+    let file_title = indexed_file_title(titles, default_external_session_id);
+    if let Some(title) = indexed_session_title(
+        titles,
+        context.session_id.as_deref(),
+        default_external_session_id,
+    )
+    .or(file_title.clone())
+    {
+        context.title = Some(title);
+    }
+
+    // Existing imports used the stable JSONL filename as the external session
+    // ID when Codex nested the real ID under `payload`. Keep that identity so
+    // title backfill updates existing rows and does not duplicate usage events.
+    if file_title.is_some() {
+        context.session_id = Some(default_external_session_id.to_owned());
+    }
+}
+
 fn parse_context(value: &Value, default_session_id: &str, state: &ParseState) -> ParseContext {
     let record_type = value_string(value, &["type", "event_type", "eventType"])
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let session_id = value_string(
+    let session_id = payload_value_string(
         value,
         &[
             "session_id",
             "sessionId",
             "conversation_id",
             "conversationId",
+            "thread_id",
+            "threadId",
+            "agent_thread_id",
+            "agentThreadId",
         ],
     )
     .or_else(|| {
         (record_type.contains("session") || record_type.contains("subagent"))
-            .then(|| value_string(value, &["id"]))
+            .then(|| payload_value_string(value, &["id"]))
             .flatten()
     })
     .or_else(|| state.current_session_id.clone())
@@ -478,30 +671,27 @@ fn parse_context(value: &Value, default_session_id: &str, state: &ParseState) ->
 
     ParseContext {
         session_id,
-        parent_session_id: value_string(
+        parent_session_id: payload_value_string(
             value,
-            &["parent_session_id", "parentSessionId", "parent_session"],
+            &[
+                "parent_session_id",
+                "parentSessionId",
+                "parent_session",
+                "parent_thread_id",
+                "parentThreadId",
+            ],
         ),
-        project_path: value_string(
+        project_path: payload_value_string(
             value,
             &["project_path", "projectPath", "cwd", "working_directory"],
         ),
-        title: value_string(value, &["title", "session_title", "sessionTitle"]),
-        model: value_string(value, &["model", "model_name", "modelName"]),
-        request_id: value_string(value, &["request_id", "requestId"]),
-        response_id: value_string(value, &["response_id", "responseId"]),
-        query_source: value_string(value, &["query_source", "querySource"]),
-        timestamp: value
-            .get("timestamp")
-            .or_else(|| value.get("occurred_at"))
-            .or_else(|| value.get("created_at"))
-            .or_else(|| value.get("createdAt"))
-            .or_else(|| value.get("time"))
-            .and_then(parse_timestamp),
-        inherited_history: value
-            .get("inherited")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+        title: payload_value_string(value, &["title", "session_title", "sessionTitle"]),
+        model: payload_value_string(value, &["model", "model_name", "modelName"]),
+        request_id: payload_value_string(value, &["request_id", "requestId"]),
+        response_id: payload_value_string(value, &["response_id", "responseId"]),
+        query_source: payload_value_string(value, &["query_source", "querySource"]),
+        timestamp: timestamp_value(value),
+        inherited_history: payload_value_bool(value, &["inherited"]).unwrap_or(false)
             || record_type.contains("inherited")
             || record_type.contains("history_copy"),
     }
@@ -649,6 +839,51 @@ fn value_string(value: &Value, keys: &[&str]) -> Option<String> {
         .find_map(|key| value.get(*key).and_then(Value::as_str).map(str::to_owned))
 }
 
+fn payload_value_string(value: &Value, keys: &[&str]) -> Option<String> {
+    value_string(value, keys).or_else(|| {
+        value
+            .get("payload")
+            .and_then(|payload| value_string(payload, keys))
+    })
+}
+
+fn payload_value_bool(value: &Value, keys: &[&str]) -> Option<bool> {
+    value
+        .as_object()
+        .and_then(|object| keys.iter().find_map(|key| object.get(*key)?.as_bool()))
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|payload| payload_value_bool(payload, keys))
+        })
+}
+
+fn timestamp_value(value: &Value) -> Option<DateTime<Utc>> {
+    let timestamp = [
+        "timestamp",
+        "occurred_at",
+        "created_at",
+        "createdAt",
+        "time",
+    ]
+    .iter()
+    .find_map(|key| value.get(*key))
+    .or_else(|| {
+        value.get("payload").and_then(|payload| {
+            [
+                "timestamp",
+                "occurred_at",
+                "created_at",
+                "createdAt",
+                "time",
+            ]
+            .iter()
+            .find_map(|key| payload.get(*key))
+        })
+    });
+    timestamp.and_then(parse_timestamp)
+}
+
 fn parse_timestamp(value: &Value) -> Option<DateTime<Utc>> {
     if let Some(value) = value.as_str() {
         return DateTime::parse_from_rfc3339(value)
@@ -785,7 +1020,7 @@ mod tests {
     use tempfile::TempDir;
     use tokenbuddy_domain::PrecisionLevel;
 
-    use super::{CodexSessionAdapter, default_codex_home};
+    use super::{CodexSessionAdapter, SESSION_INDEX_RESOURCE_ID, default_codex_home};
 
     fn fixture_home(fixture: &str) -> TempDir {
         let home = tempfile::tempdir().expect("temporary home");
@@ -835,11 +1070,161 @@ mod tests {
         )
         .and_then(|_| file.write_all(b"\n"))
         .expect("append fixture record");
+        file.flush().expect("flush appended fixture record");
+        drop(file);
         let third = adapter
             .import_history_sync(&cursors)
             .expect("incremental import");
         assert_eq!(third.usage_events.len(), 1);
         assert_eq!(third.usage_events[0].usage.input_tokens_total, Some(20));
+    }
+
+    #[test]
+    fn retries_an_incomplete_final_jsonl_line_after_append() {
+        let home = fixture_home("simple_session.jsonl");
+        let adapter = CodexSessionAdapter::new(home.path());
+        let session_path = home.path().join("sessions/simple_session.jsonl");
+        let baseline = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("baseline import");
+        let baseline_cursors = baseline
+            .cursors
+            .into_iter()
+            .map(|cursor| (cursor.resource_id.clone(), cursor))
+            .collect();
+
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&session_path)
+            .expect("open fixture for partial append");
+        use std::io::Write;
+        file.write_all(
+            br#"{"type":"response.completed","session_id":"simple-session","timestamp":"2026-07-25T08:00:04Z","request_id":"partial-request","model":"gpt-5-codex","usage":{"input_tokens":20,"output_tokens":8}"#,
+        )
+        .expect("append incomplete record");
+        file.flush().expect("flush incomplete record");
+        drop(file);
+
+        let first = adapter
+            .import_history_sync(&baseline_cursors)
+            .expect("partial import");
+        assert!(first.usage_events.is_empty());
+        let partial_cursor = first
+            .cursors
+            .iter()
+            .find(|cursor| cursor.resource_id.ends_with("simple_session.jsonl"))
+            .expect("session cursor");
+        assert!(partial_cursor.byte_offset < fs::metadata(&session_path).unwrap().len() as i64);
+
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&session_path)
+            .expect("reopen fixture for completion");
+        file.write_all(b"}\n").expect("complete partial record");
+        file.flush().expect("flush completed record");
+        drop(file);
+        let cursors = first
+            .cursors
+            .into_iter()
+            .map(|cursor| (cursor.resource_id.clone(), cursor))
+            .collect();
+        let second = adapter
+            .import_history_sync(&cursors)
+            .expect("retry completed record");
+        assert_eq!(second.usage_events.len(), 1);
+        assert_eq!(
+            second.usage_events[0].request_id.as_deref(),
+            Some("partial-request")
+        );
+    }
+
+    #[test]
+    fn imports_codex_thread_name_from_the_session_index() {
+        let home = fixture_home("indexed_session.jsonl");
+        let index_path = home.path().join("session_index.jsonl");
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/codex/session_index.jsonl");
+        fs::copy(fixture_path, index_path).expect("copy session index fixture");
+
+        let adapter = CodexSessionAdapter::new(home.path());
+        let batch = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("indexed title import");
+        assert_eq!(batch.sessions.len(), 1);
+        assert_eq!(
+            batch.sessions[0].title.as_deref(),
+            Some("完成 Phase 4b 产品化验收")
+        );
+    }
+
+    #[test]
+    fn reads_nested_codex_ids_and_preserves_the_existing_filename_identity() {
+        let home = fixture_home("rollout-indexed-session.jsonl");
+        let index_path = home.path().join("session_index.jsonl");
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/codex/session_index.jsonl");
+        fs::copy(fixture_path, index_path).expect("copy session index fixture");
+
+        let adapter = CodexSessionAdapter::new(home.path());
+        let batch = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("nested indexed title import");
+        assert_eq!(batch.sessions.len(), 1);
+        assert_eq!(batch.usage_events.len(), 1);
+        assert_eq!(
+            batch.sessions[0].external_session_id.as_deref(),
+            Some("rollout-indexed-session")
+        );
+        assert_eq!(
+            batch.sessions[0].title.as_deref(),
+            Some("完成 Phase 4b 产品化验收")
+        );
+        assert_eq!(
+            batch.usage_events[0].session_id.as_deref(),
+            Some(batch.sessions[0].id.as_str())
+        );
+    }
+
+    #[test]
+    fn backfills_indexed_title_when_the_log_cursor_is_at_eof() {
+        let home = fixture_home("indexed_session.jsonl");
+        let index_path = home.path().join("session_index.jsonl");
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/codex/session_index.jsonl");
+        fs::copy(fixture_path, index_path).expect("copy session index fixture");
+
+        let adapter = CodexSessionAdapter::new(home.path());
+        let first = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("initial indexed title import");
+        let cursors = first
+            .cursors
+            .into_iter()
+            .filter(|cursor| cursor.resource_id != SESSION_INDEX_RESOURCE_ID)
+            .map(|cursor| (cursor.resource_id.clone(), cursor))
+            .collect();
+
+        let second = adapter
+            .import_history_sync(&cursors)
+            .expect("indexed title backfill");
+        assert!(second.usage_events.is_empty());
+        assert_eq!(second.sessions.len(), 1);
+        assert_eq!(second.cursors.len(), 2);
+        assert_eq!(
+            second.sessions[0].title.as_deref(),
+            Some("完成 Phase 4b 产品化验收")
+        );
+
+        let stable_cursors = second
+            .cursors
+            .into_iter()
+            .map(|cursor| (cursor.resource_id.clone(), cursor))
+            .collect();
+        let third = adapter
+            .import_history_sync(&stable_cursors)
+            .expect("stable indexed title import");
+        assert!(third.sessions.is_empty());
+        assert!(third.usage_events.is_empty());
     }
 
     #[test]

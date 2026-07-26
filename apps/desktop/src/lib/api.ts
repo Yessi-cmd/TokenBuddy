@@ -26,7 +26,9 @@ export interface QuotaSummary {
 export interface QuickSummary {
   collection_status: CollectionStatus;
   active_app: AppKind | null;
+  active_session_id: string | null;
   active_session_title: string | null;
+  active_project_path: string | null;
   provider_name: string | null;
   model: string | null;
   session_input_tokens: number | null;
@@ -126,6 +128,24 @@ export interface DashboardSummary {
   totals: UsageTotals;
 }
 
+export interface UsageFilters {
+  period_start?: string | null;
+  period_end?: string | null;
+  app?: AppKind | null;
+  provider_id?: string | null;
+  account_id?: string | null;
+  model?: string | null;
+  project_path?: string | null;
+  precision?: PrecisionLevel | null;
+  search?: string | null;
+}
+
+export interface ExportResult {
+  filename: string;
+  mime_type: string;
+  content: string;
+}
+
 export interface SourceRecord {
   id: string;
   adapter_type: string;
@@ -160,6 +180,49 @@ export interface DetectionResult {
 export interface LocalWebApiStatus {
   running: boolean;
   url: string | null;
+  loopback_urls?: string[];
+}
+
+export interface ProviderSummary {
+  id: string;
+  provider_family: string;
+  display_name: string;
+  upstream_url: string | null;
+  launcher: LauncherKind | null;
+  source_id: string | null;
+  account_count: number;
+  request_count: number;
+  successful_request_count: number | null;
+  success_rate_percent: number | null;
+  average_latency_ms: number | null;
+  totals: UsageTotals;
+}
+
+export interface QuotaSnapshot {
+  id: string;
+  account_id: string;
+  account_name: string | null;
+  provider_name: string | null;
+  captured_at: string;
+  window_type: string;
+  used_percent: number | null;
+  remaining_percent: number | null;
+  reset_at: string | null;
+  credits_remaining: number | null;
+  precision: PrecisionLevel;
+  raw_json: Record<string, unknown> | null;
+}
+
+export interface AppSettings {
+  codex_home: string | null;
+  claude_home: string | null;
+  cc_switch_db_path: string | null;
+  cockpit_path: string | null;
+  otel_port: number | null;
+  auto_start: boolean;
+  proxy_enabled: boolean;
+  save_request_metadata: boolean;
+  data_retention_days: number | null;
 }
 
 function inTauri(): boolean {
@@ -199,10 +262,31 @@ export function getQuickSummary(): Promise<QuickSummary> {
   return request<QuickSummary>("get_quick_summary", "/api/quick-summary");
 }
 
-export function getDashboardSummary(): Promise<DashboardSummary> {
+export function getDashboardSummary(
+  filters: UsageFilters = {},
+): Promise<DashboardSummary> {
   return request<DashboardSummary>(
     "get_dashboard_summary",
-    "/api/dashboard-summary",
+    `/api/dashboard-summary${queryString({ ...filters })}`,
+    { filters },
+  );
+}
+
+export function exportUsage(
+  format: "csv" | "json",
+  filters: UsageFilters = {},
+): Promise<ExportResult> {
+  return request<ExportResult>(
+    "export_usage",
+    "/api/export",
+    { format, filters },
+    inTauri()
+      ? undefined
+      : {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ format, filters }),
+        },
   );
 }
 
@@ -248,6 +332,40 @@ export function listSources(): Promise<SourceRecord[]> {
   return request<SourceRecord[]>("list_sources", "/api/sources");
 }
 
+export function listProviders(): Promise<ProviderSummary[]> {
+  return request<ProviderSummary[]>("list_providers", "/api/providers");
+}
+
+export function listQuotaSnapshots(
+  accountId: string | null = null,
+  limit = 100,
+): Promise<QuotaSnapshot[]> {
+  return request<QuotaSnapshot[]>(
+    "list_quota_snapshots",
+    `/api/quotas${queryString({ account_id: accountId, limit })}`,
+    { accountId, limit },
+  );
+}
+
+export function getAppSettings(): Promise<AppSettings> {
+  return request<AppSettings>("get_app_settings", "/api/settings");
+}
+
+export function updateAppSettings(settings: AppSettings): Promise<AppSettings> {
+  return request<AppSettings>(
+    "update_app_settings",
+    "/api/settings",
+    { settings },
+    inTauri()
+      ? undefined
+      : {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(settings),
+        },
+  );
+}
+
 export function detectCodexPath(
   codexHome: string | null,
 ): Promise<DetectionResult> {
@@ -271,6 +389,33 @@ export function rescanCodex(codexHome: string | null): Promise<RescanResult> {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ codex_home: codexHome }),
+        },
+  );
+}
+
+export function detectClaudePath(
+  claudeHome: string | null,
+): Promise<DetectionResult> {
+  return request<DetectionResult>(
+    "detect_claude_path",
+    `/api/detect-claude${queryString({ claude_home: claudeHome })}`,
+    { claudeHome },
+  );
+}
+
+export function rescanClaude(claudeHome: string | null): Promise<RescanResult> {
+  return request<RescanResult>(
+    "rescan_claude",
+    "/api/rescan-claude",
+    {
+      claudeHome,
+    },
+    inTauri()
+      ? undefined
+      : {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ claude_home: claudeHome }),
         },
   );
 }

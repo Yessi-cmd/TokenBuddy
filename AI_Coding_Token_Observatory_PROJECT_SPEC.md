@@ -1991,10 +1991,12 @@ T001 至 T014 是本计划最初定义的第一批任务编号，并不是全部
 [x] Phase 0：仓库初始化
 [x] Phase 1：数据核心
 [x] Phase 2：Codex Session
-[ ] Phase 3：Claude Session
+[x] Phase 3：Claude Session
 [x] Phase 4a：初始桌面面板（T011-T013）
 [x] Phase 4b：Tray-first 最小闭环（后台 Core、QuickSummary、托盘、轻量弹窗与 loopback API）
-[ ] Phase 4b 展示层补全：完整共享 SPA 路由、性能真机验证与原生文件通知
+[x] Phase 4b 展示层与采集可靠性补全：共享 SPA 路由、原生文件通知、轮询兜底、loopback `::1` 与 Core 多入口集成测试
+[x] Phase 4b 正确性与 MVP 补全：QuickSummary Core 边界、部分 JSONL 行重试、缺失值聚合、筛选与 CSV/JSON 导出、单实例、自启动和按需 WebView
+[ ] Phase 4b 跨平台真机交互补验：Windows 托盘与 macOS/Windows 菜单栏或托盘交互、隐藏窗口持续采集和 Windows CPU/P95
 [ ] Phase 5：OTel
 [ ] Phase 6：CC Switch / Cockpit
 [ ] Phase 7：可选本地代理
@@ -2010,6 +2012,10 @@ Phase 2 已完成：Codex 脱敏 JSONL fixture、普通 usage 与累计快照解
 
 Phase 4a 已完成：Tauri commands 已提供 dashboard、session list/detail、usage event 和 source 查询；最小 Dashboard、会话列表/详情时间线、精度徽标、Codex 路径检测和显式扫描入口已完成。T014 CI 已加入 macOS/Windows 的前端、Rust 测试、lint、检查和 Tauri 无 bundle 编译步骤。
 
-Phase 4b 最小闭环已完成：新增独立 `tokenbuddy-core`，由单个后台线程持有 SQLite 查询 / 写入边界，启动时导入现有 Codex Session 并持续执行基于 cursor 的增量轮询；Core 维护 `QuickSummary`，Tauri commands、macOS 菜单栏 / Windows 托盘、隐藏启动的完整窗口、轻量 `/quick` 窗口和按需 loopback HTTP API 共用同一 Core。关闭完整窗口只隐藏窗口，退出菜单才停止 Core；本地网页服务只绑定 `127.0.0.1`。
+Phase 3 已完成：新增独立 `tokenbuddy-claude-session`，支持 Claude Code `projects/**/*.jsonl` 的 V1/V2/保守 fallback 解析、脱敏 usage 保留、子 Agent 父子会话、继承历史跳过、增量 cursor、部分尾行重试、文件轮转、累计快照差分和重复导入幂等；Claude Home 支持 macOS/Linux 默认路径、Windows 默认路径和用户自定义配置。Core 以独立 Adapter 边界导入 Codex 与 Claude，单个来源失败不会阻断另一个来源，并通过 Tauri IPC、loopback API 和共享 React SPA 暴露检测/重扫入口。Claude Session 的缺失字段、Provider/费用归属和未知未来 Schema 保持 `Unavailable`；Claude OTel 仍按 Phase 5 实现。
 
-Phase 4b 展示层仍有明确后续项：当前轻量闭环使用跨平台定时增量轮询，尚未替换为 `notify` 原生文件事件；完整共享 SPA 的 `/providers`、`/quotas`、`/settings` 等展示路由和 macOS / Windows 真机交互、`QuickSummary` P95、轻量弹窗 P95、空闲 CPU 测量仍待完成。Claude Session、OTel、CC Switch、Cockpit、官方额度数据源和本地代理仍按后续 Phase 实现，本地代理继续不是 Core 或统计功能的前置条件。
+Phase 4b 最小闭环已完成：新增独立 `tokenbuddy-core`，由单个后台线程持有 SQLite 查询 / 写入边界，启动时导入现有 Codex 与 Claude Session 并持续执行基于 cursor 的增量导入；Core 维护 `QuickSummary`，Tauri commands、macOS 菜单栏 / Windows 托盘、隐藏启动的完整窗口、轻量 `/quick` 窗口和按需 loopback HTTP API 共用同一 Core。关闭完整窗口只隐藏窗口，退出菜单才停止 Core；本地网页服务绑定 `127.0.0.1` 与 `::1`。
+
+Phase 4b 展示层与采集可靠性实现已完成：Core 使用 `notify` 原生文件事件作为正常唤醒路径，并保留低频轮询兜底；新增 Core 生命周期和多入口共享的集成测试；共享 SPA 已覆盖 `/providers`、`/quotas`、`/settings`，对应 Tauri / loopback 查询契约和显式 `Unavailable` 状态；`QuickSummary` 查询 P95、轻量 HTTP 入口 P95 和 macOS 打包应用空闲 CPU 已完成测量。macOS debug 打包验收已实际打开三个新增路由，关闭完整窗口后保持进程和 Core 存活，并在隐藏窗口期间通过原生事件导入脱敏 fixture 新记录。Windows 真实托盘交互、隐藏窗口持续采集和 CPU/P95 仍需在 Windows 真机或 CI 运行环境补验；macOS 状态栏图标的直接点击仍受当前 Computer Use 无法读取 `SystemUIServer` 状态项的限制，但默认 accessory 启动、完整窗口隐藏和 Core 采集链路已确认。Claude OTel、CC Switch、Cockpit、官方额度数据源和本地代理仍按后续 Phase 实现，本地代理继续不是 Core 或统计功能的前置条件。
+
+Phase 4b 正确性与 MVP 补全已完成：Quick 面板只消费 Core 的 `QuickSummary`，展示活动会话的标题、项目、Provider 和模型；Codex/Claude 导入会保留未完成 JSONL 尾行的 cursor 位置并在追加完成后重试；Session、Provider、Dashboard 和 QuickSummary 聚合在字段缺失时返回 `Unavailable` 而不是把已知事件的部分和冒充完整总数。Dashboard 与 loopback API 已支持日期、应用、Provider、账号、模型、项目、精度和搜索筛选，并可导出不含原始 payload 的 CSV/JSON；Tauri 已接入单实例转发、自启动同步和按需创建 `main`/`quick` WebView，托盘优先启动不再预建完整 Dashboard WebView。Windows 真机安装、自启动和托盘行为仍需在 Windows 环境补验，后续 Phase 的 Claude OTel、CC Switch、Cockpit、官方额度 Adapter 和本地代理未在本批次实现。

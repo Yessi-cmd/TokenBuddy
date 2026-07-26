@@ -4,6 +4,7 @@ members = [
     "crates/domain",
     "crates/storage",
     "crates/adapters/codex-session",
+    "crates/adapters/claude-session",
     "crates/core",
 ]
 resolver = "3"
@@ -15,12 +16,15 @@ rust-version = "1.93"
 
 [workspace.dependencies]
 chrono = { version = "0.4.41", features = ["clock", "serde"] }
+notify = "8.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 sha2 = "0.10.9"
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-build = "2.6.3"
+tauri-plugin-autostart = "2.5.1"
+tauri-plugin-single-instance = "2.4.3"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
 tokenbuddy-domain = { path = "crates/domain" }

@@ -10,32 +10,6 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "TokenBuddy",
-        "width": 1100,
-        "height": 720,
-        "minWidth": 860,
-        "minHeight": 600,
-        "resizable": true,
-        "visible": false
-      },
-      {
-        "label": "quick",
-        "title": "TokenBuddy QuickSummary",
-        "url": "/quick",
-        "width": 360,
-        "height": 460,
-        "minWidth": 320,
-        "minHeight": 360,
-        "decorations": false,
-        "resizable": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "visible": false
-      }
-    ],
     "security": {
       "csp": null
     }
