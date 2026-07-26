@@ -15,6 +15,7 @@
 //! attribution is impossible; per spec §11.3 Cockpit therefore contributes
 //! provider and account context only. Credentials and the account store are
 //! never touched.
+#![warn(missing_docs)]
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -33,10 +34,15 @@ use tokenbuddy_sqlite_source::{
     column_names, column_set, epoch_to_utc, int_col, open_read_only, string_col, table_exists,
 };
 
+/// Stable id of this source.
 pub const SOURCE_ID: &str = "cockpit";
+/// Adapter kind recorded on the source row.
 pub const ADAPTER_TYPE: &str = "cockpit";
+/// Name shown in the UI.
 pub const DISPLAY_NAME: &str = "Cockpit Tools";
+/// Cockpit's request-log database file name.
 pub const DB_FILENAME: &str = "codex_local_access_logs.sqlite";
+/// Cockpit's data directory inside the user's home.
 pub const HOME_DIRNAME: &str = ".antigravity_cockpit";
 const LOGS_RESOURCE_ID: &str = "request_logs";
 /// Cockpit's accounts are ChatGPT accounts; the quota and the plan belong to
@@ -52,13 +58,19 @@ const WINDOW_GAP_SECONDS: i64 = 30 * 60;
 /// apart, so windows are padded before matching.
 const WINDOW_PADDING_SECONDS: i64 = 60;
 
+/// Why reading the Cockpit database failed.
 #[derive(Debug, Error)]
 pub enum CockpitAdapterError {
+    /// The database could not be opened or queried.
     #[error("failed to read Cockpit database: {0}")]
     Sqlite(#[from] rusqlite::Error),
 }
 
 #[derive(Debug, Clone)]
+/// Reads Cockpit's request log for account identity and activity windows.
+///
+/// Emits no usage events: Codex already logged these same requests, and its own
+/// log ranks higher as a token source.
 pub struct CockpitAdapter {
     db_path: PathBuf,
     fingerprint_salt: Option<String>,
@@ -83,10 +95,12 @@ impl CockpitAdapter {
         self
     }
 
+    /// The database this adapter reads.
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }
 
+    /// Whether the configured database is present.
     pub fn detect_sync(&self) -> Result<DetectionResult, CockpitAdapterError> {
         let detected = self.db_path.is_file();
         Ok(DetectionResult {
@@ -102,6 +116,7 @@ impl CockpitAdapter {
         })
     }
 
+    /// Current health of this source.
     pub fn health_sync(&self) -> SourceHealth {
         let detected = self.db_path.is_file();
         SourceHealth {
@@ -116,6 +131,7 @@ impl CockpitAdapter {
         }
     }
 
+    /// Read request-log rows since `cursors`, producing accounts and windows.
     pub fn import_history_sync(
         &self,
         cursors: &HashMap<String, ImportCursor>,
@@ -338,6 +354,7 @@ fn resolve_db_path(path: PathBuf) -> PathBuf {
     path
 }
 
+/// The platform's default Cockpit database location.
 pub fn default_cockpit_db() -> Option<PathBuf> {
     #[cfg(windows)]
     let home = std::env::var_os("USERPROFILE");

@@ -1,3 +1,11 @@
+//! The TokenBuddy desktop shell.
+//!
+//! Owns the tray, the windows, the `#[tauri::command]` layer, and the optional
+//! loopback HTTP server. It holds an `Arc<Core>` and never touches SQLite or a
+//! source file itself, so every surface it exposes reads the same data through
+//! the same aggregation.
+#![warn(missing_docs)]
+
 mod web;
 
 use std::{
@@ -804,6 +812,11 @@ fn setup_tray<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Build and run the desktop application.
+///
+/// Starts the Core, registers the tray, and keeps the windows hidden: the app
+/// is a background collector that shows UI on demand, not a window that happens
+/// to collect (spec §4.1). Blocks until the user quits from the tray.
 pub fn run() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {

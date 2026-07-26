@@ -4,6 +4,7 @@
 //! keeps the schema-specific extraction in small versioned parsers and uses a
 //! conservative fallback that only accepts explicit, stable fields. Message
 //! bodies are deliberately never copied into the domain model or raw payload.
+#![warn(missing_docs)]
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -24,38 +25,49 @@ use tokenbuddy_domain::{
     UsageAdapter, UsageEvent, WatcherHandle,
 };
 
+/// Stable id of this source, used for cursors, event hashes, and session ids.
 pub const SOURCE_ID: &str = "claude-code-session";
+/// Adapter kind recorded on the source row.
 pub const ADAPTER_TYPE: &str = "claude_session";
+/// Name shown in the UI.
 pub const DISPLAY_NAME: &str = "Claude Code Sessions";
 
+/// Why reading the Claude Code transcripts failed.
 #[derive(Debug, Error)]
 pub enum ClaudeAdapterError {
+    /// A transcript file could not be read.
     #[error("failed to read Claude Code session files: {0}")]
     Io(#[from] io::Error),
+    /// The configured home exists but is not a directory.
     #[error("Claude Code home is not a directory: {0}")]
     InvalidHome(PathBuf),
 }
 
 #[derive(Debug, Clone)]
+/// Reads a Claude Code home: the per-project transcript files.
 pub struct ClaudeSessionAdapter {
     claude_home: PathBuf,
 }
 
 impl ClaudeSessionAdapter {
+    /// An adapter for `claude_home`.
     pub fn new(claude_home: impl Into<PathBuf>) -> Self {
         Self {
             claude_home: claude_home.into(),
         }
     }
 
+    /// The home this adapter reads.
     pub fn claude_home(&self) -> &Path {
         &self.claude_home
     }
 
+    /// Where transcripts live inside the home.
     pub fn projects_dir(&self) -> PathBuf {
         self.claude_home.join("projects")
     }
 
+    /// Whether this home holds a projects directory.
     pub fn detect_sync(&self) -> Result<DetectionResult, ClaudeAdapterError> {
         let projects_dir = self.projects_dir();
         let detected = projects_dir.is_dir();
@@ -72,6 +84,7 @@ impl ClaudeSessionAdapter {
         })
     }
 
+    /// Read everything new since `cursors` and return it as one batch.
     pub fn import_history_sync(
         &self,
         cursors: &HashMap<String, ImportCursor>,
@@ -110,6 +123,7 @@ impl ClaudeSessionAdapter {
         Ok(batch)
     }
 
+    /// Current health of this source.
     pub fn health_sync(&self) -> SourceHealth {
         let detected = self.projects_dir().is_dir();
         SourceHealth {
@@ -914,6 +928,7 @@ fn adapter_error(error: ClaudeAdapterError) -> AdapterError {
     }
 }
 
+/// The platform's default Claude home, if the environment names one.
 pub fn default_claude_home() -> Option<PathBuf> {
     #[cfg(windows)]
     {

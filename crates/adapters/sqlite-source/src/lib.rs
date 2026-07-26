@@ -11,6 +11,7 @@
 //! Deliberately *not* here: table names, column names, and any interpretation of
 //! their values. Keeping those in the adapters is what lets one third-party
 //! schema change without touching another adapter.
+#![warn(missing_docs)]
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

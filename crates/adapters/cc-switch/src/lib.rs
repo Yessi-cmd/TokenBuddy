@@ -18,6 +18,7 @@
 //! request*, which a session log never records. That fixes attribution the model
 //! name cannot: `deepseek-v4-pro` reached through a Claude-compatible relay is
 //! DeepSeek, not Anthropic.
+#![warn(missing_docs)]
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -37,19 +38,29 @@ use tokenbuddy_sqlite_source::{
     column_names, column_set, epoch_to_utc, int_col, open_read_only, string_col, table_exists,
 };
 
+/// Stable id of this source.
 pub const SOURCE_ID: &str = "cc-switch";
+/// Adapter kind recorded on the source row.
 pub const ADAPTER_TYPE: &str = "cc_switch";
+/// Name shown in the UI.
 pub const DISPLAY_NAME: &str = "CC-Switch";
+/// CC-Switch's database file name.
 pub const DB_FILENAME: &str = "cc-switch.db";
 const LOGS_RESOURCE_ID: &str = "proxy_request_logs";
 
+/// Why reading the CC-Switch database failed.
 #[derive(Debug, Error)]
 pub enum CcSwitchAdapterError {
+    /// The database could not be opened or queried.
     #[error("failed to read CC-Switch database: {0}")]
     Sqlite(#[from] rusqlite::Error),
 }
 
 #[derive(Debug, Clone)]
+/// Reads CC-Switch's database for provider identity and session attribution.
+///
+/// Emits no usage events: CC-Switch proxies requests the session logs already
+/// record, and those rank higher as a token source.
 pub struct CcSwitchAdapter {
     db_path: PathBuf,
 }
@@ -63,10 +74,12 @@ impl CcSwitchAdapter {
         }
     }
 
+    /// The database this adapter reads.
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }
 
+    /// Whether the configured database is present.
     pub fn detect_sync(&self) -> Result<DetectionResult, CcSwitchAdapterError> {
         let detected = self.db_path.is_file();
         Ok(DetectionResult {
@@ -82,6 +95,7 @@ impl CcSwitchAdapter {
         })
     }
 
+    /// Current health of this source.
     pub fn health_sync(&self) -> SourceHealth {
         let detected = self.db_path.is_file();
         SourceHealth {
@@ -96,6 +110,7 @@ impl CcSwitchAdapter {
         }
     }
 
+    /// Read providers, endpoints, and proxied requests since `cursors`.
     pub fn import_history_sync(
         &self,
         cursors: &HashMap<String, ImportCursor>,
@@ -333,6 +348,7 @@ fn resolve_db_path(path: PathBuf) -> PathBuf {
     }
 }
 
+/// The platform's default CC-Switch database location.
 pub fn default_cc_switch_db() -> Option<PathBuf> {
     #[cfg(windows)]
     let home = std::env::var_os("USERPROFILE");

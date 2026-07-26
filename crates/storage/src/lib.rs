@@ -1,3 +1,12 @@
+//! Persistence: SQLite schema, idempotent import, and every aggregation query.
+//!
+//! This is the only crate that talks to the database. Adapters produce domain
+//! records, the Core hands them here as one batch per pass, and every panel
+//! reads through the query methods below — so the rules that keep the numbers
+//! honest (missing stays missing, a duplicate import changes nothing, a
+//! launcher outranks a guess) are enforced in one place.
+#![warn(missing_docs)]
+
 mod migrations;
 
 use std::{collections::HashMap, fmt::Write as FmtWrite, path::Path, time::SystemTime};
@@ -13,45 +22,89 @@ use tokenbuddy_domain::{
     SessionSummary, SourceRecord, UsageEvent, UsageEventPage, UsageFilters, UsageTotals,
 };
 
+/// Result of any storage operation.
 pub type Result<T> = std::result::Result<T, StorageError>;
 
+/// Anything that can go wrong while reading or writing the database.
+///
+/// The stored-value variants name the offending field: a database written by a
+/// newer version, or corrupted by hand, should say what it tripped over rather
+/// than fail as an opaque parse error.
 #[derive(Debug, Error)]
 pub enum StorageError {
+    /// SQLite itself refused the operation.
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A JSON column could not be encoded or decoded.
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    /// The database file or its directory could not be reached.
     #[error("filesystem error: {0}")]
     Io(#[from] std::io::Error),
+    /// A stored timestamp is not valid RFC 3339.
     #[error("invalid datetime in {field}: {value}")]
-    InvalidDateTime { field: String, value: String },
+    InvalidDateTime {
+        /// Column that held the value.
+        field: String,
+        /// The value as stored.
+        value: String,
+    },
+    /// A stored token count does not fit the type it is read into — negative,
+    /// or beyond the representable range.
     #[error("invalid token count in {field}")]
-    InvalidTokenCount { field: String },
+    InvalidTokenCount {
+        /// Column that held the value.
+        field: String,
+    },
+    /// A stored enum name is not one this version knows.
     #[error("unknown stored enum value for {field}: {value}")]
-    UnknownEnum { field: String, value: String },
+    UnknownEnum {
+        /// Column that held the value.
+        field: String,
+        /// The value as stored.
+        value: String,
+    },
+    /// Migrations did not reach the expected version, usually because the file
+    /// was written by a newer build. Refused rather than used, so a downgrade
+    /// cannot silently misread a newer schema.
     #[error("database migration stopped at unsupported version {0}")]
     MigrationVersion(i64),
+    /// An export format that is not supported. Never falls back to another.
     #[error("unsupported export format: {0}")]
     UnsupportedExportFormat(String),
+    /// The per-install fingerprint salt could not be stored.
     #[error("failed to persist the local fingerprint salt")]
     MissingLocalSalt,
 }
 
+/// What applying one batch changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImportStats {
+    /// Events newly stored.
     pub inserted_events: u64,
+    /// Events already present, recognised by hash.
     pub duplicate_events: u64,
+    /// Sessions created or refreshed.
     pub upserted_sessions: u64,
+    /// Cursors advanced.
     pub updated_cursors: u64,
+    /// Accounts created or refreshed.
     pub upserted_accounts: u64,
+    /// Quota readings newly stored.
     pub inserted_quota_snapshots: u64,
+    /// Already-stored events that a newly imported activity window attributed
+    /// to a real account.
     pub attributed_account_events: u64,
 }
 
+/// What enforcing the retention window removed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RetentionOutcome {
+    /// Usage events deleted.
     pub deleted_events: u64,
+    /// Sessions deleted once they had no events left.
     pub deleted_sessions: u64,
+    /// Quota readings deleted.
     pub deleted_quota: u64,
 }
 
@@ -87,11 +140,16 @@ const SESSION_PAGE_SELECT: &str = "\
     ORDER BY COALESCE(s.ended_at, s.updated_at, s.started_at, s.created_at) DESC
     LIMIT ?11 OFFSET ?12";
 
+/// An open TokenBuddy database, migrated to the current schema.
 pub struct Database {
     connection: Connection,
 }
 
 impl Database {
+    /// Open (creating if needed) and migrate the database at `path`.
+    ///
+    /// Missing parent directories are created, so a first run on a clean
+    /// machine works without setup.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -104,6 +162,7 @@ impl Database {
         Ok(Self { connection })
     }
 
+    /// A migrated in-memory database, for tests.
     pub fn open_in_memory() -> Result<Self> {
         let mut connection = Connection::open_in_memory()?;
         configure_connection(&connection)?;
@@ -111,10 +170,18 @@ impl Database {
         Ok(Self { connection })
     }
 
+    /// The underlying connection, for tests that need to assert on raw rows.
     pub fn connection(&self) -> &Connection {
         &self.connection
     }
 
+    /// Apply one adapter batch in a single transaction.
+    ///
+    /// Ordering matters and is deliberate: sources, providers, and accounts
+    /// first so events can reference real identities; attributions and activity
+    /// windows before events so rows landing in this batch resolve immediately
+    /// and earlier rows get backfilled; cursors last so a failure re-reads the
+    /// same input rather than skipping it.
     pub fn apply_import_batch(&mut self, batch: &ImportBatch) -> Result<ImportStats> {
         let transaction = self.connection.transaction()?;
         let mut stats = ImportStats {
@@ -258,6 +325,7 @@ impl Database {
         })
     }
 
+    /// Every configured source with its health.
     pub fn list_sources(&self) -> Result<Vec<SourceRecord>> {
         let mut statement = self.connection.prepare(
             "SELECT id, adapter_type, display_name, path_or_endpoint, enabled,
@@ -270,6 +338,7 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Providers with their request, latency, and token aggregates.
     pub fn list_providers(&self) -> Result<Vec<ProviderSummary>> {
         let mut statement = self.connection.prepare(
             "SELECT p.id, p.provider_family, p.display_name, p.upstream_url, p.launcher,
@@ -345,6 +414,7 @@ impl Database {
             .collect()
     }
 
+    /// Quota readings, newest first, optionally for one account.
     pub fn list_quota_snapshots(
         &self,
         account_id: Option<&str>,
@@ -404,6 +474,7 @@ impl Database {
             .flatten())
     }
 
+    /// The stored settings, or defaults if none were ever saved.
     pub fn get_app_settings(&self) -> Result<AppSettings> {
         let settings = self
             .connection
@@ -419,6 +490,8 @@ impl Database {
         Ok(settings.unwrap_or_default())
     }
 
+    /// Replace the settings row. The fingerprint salt lives in the same row and
+    /// is deliberately not touched here.
     pub fn save_app_settings(&self, settings: &AppSettings) -> Result<()> {
         self.connection.execute(
             "INSERT INTO app_settings (
@@ -451,6 +524,7 @@ impl Database {
         Ok(())
     }
 
+    /// The cursor for one resource of one source, if it has been read before.
     pub fn get_import_cursor(
         &self,
         source_id: &str,
@@ -469,6 +543,8 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Every cursor of one source, keyed by resource id, as adapters need them
+    /// at the start of a pass.
     pub fn list_import_cursors(&self, source_id: &str) -> Result<HashMap<String, ImportCursor>> {
         let mut statement = self.connection.prepare(
             "SELECT source_id, resource_id, file_size, modified_at, byte_offset,
@@ -485,6 +561,10 @@ impl Database {
         Ok(cursors)
     }
 
+    /// One page of sessions with totals over the filtered events.
+    ///
+    /// Sessions with no matching event are kept unless the filters are about
+    /// events themselves — an empty session is a fact, not a gap.
     pub fn list_session_page(
         &self,
         filters: &UsageFilters,
@@ -566,6 +646,7 @@ impl Database {
         })
     }
 
+    /// One session with its full request timeline.
     pub fn get_session_detail(&self, session_id: &str) -> Result<Option<SessionDetail>> {
         let summary = self
             .connection
@@ -618,6 +699,7 @@ impl Database {
         }))
     }
 
+    /// One page of usage events, optionally scoped to a session.
     pub fn list_usage_events(
         &self,
         session_id: Option<&str>,
@@ -627,6 +709,7 @@ impl Database {
         self.list_usage_events_filtered(session_id, limit, offset, &UsageFilters::default())
     }
 
+    /// One page of usage events narrowed by the shared filters.
     pub fn list_usage_events_filtered(
         &self,
         session_id: Option<&str>,
@@ -717,6 +800,7 @@ impl Database {
         })
     }
 
+    /// Totals over an explicit window.
     pub fn dashboard_summary(
         &self,
         period_start: DateTime<Utc>,
@@ -729,6 +813,7 @@ impl Database {
         })
     }
 
+    /// Totals over the filtered set.
     pub fn dashboard_summary_filtered(&self, filters: &UsageFilters) -> Result<DashboardSummary> {
         let (period_start, period_end) = filter_period(filters);
         let filter_params = UsageFilterParams::from_filters(filters);
@@ -836,6 +921,10 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Render the filtered events as `csv` or `json`.
+    ///
+    /// The raw source payload is excluded: an export is shareable, and the
+    /// payload is the one field that could carry something unexpected.
     pub fn export_usage(&self, format: &str, filters: &UsageFilters) -> Result<ExportResult> {
         let normalized_format = format.trim().to_ascii_lowercase();
         if normalized_format != "json" && normalized_format != "csv" {
@@ -864,6 +953,11 @@ impl Database {
         }
     }
 
+    /// Build the tray summary.
+    ///
+    /// Deliberately narrow: the newest event, its session's totals, today's
+    /// total, and that account's newest quota window. Everything the popover
+    /// shows comes from here, so it never runs a broad aggregation.
     pub fn quick_summary(
         &self,
         now: DateTime<Utc>,

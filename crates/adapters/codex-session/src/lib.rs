@@ -9,6 +9,7 @@
 //! quota windows Codex records in its rollout logs. Quota stays a separate data
 //! type from token usage (spec §8.4) — a percentage is never turned back into a
 //! token count.
+#![warn(missing_docs)]
 
 pub mod account;
 
@@ -31,20 +32,27 @@ use tokenbuddy_domain::{
     SourceHealth, SourceRecord, UsageAdapter, UsageEvent, WatcherHandle,
 };
 
+/// Stable id of this source, used for cursors, event hashes, and session ids.
 pub const SOURCE_ID: &str = "codex-session";
+/// Adapter kind recorded on the source row.
 pub const ADAPTER_TYPE: &str = "codex_session";
+/// Name shown in the UI.
 pub const DISPLAY_NAME: &str = "Codex Sessions";
 const SESSION_INDEX_RESOURCE_ID: &str = "session_index.jsonl";
 
+/// Why reading the Codex session logs failed.
 #[derive(Debug, Error)]
 pub enum CodexAdapterError {
+    /// A session file could not be read.
     #[error("failed to read Codex session files: {0}")]
     Io(#[from] io::Error),
+    /// The configured home exists but is not a directory.
     #[error("Codex session home is not a directory: {0}")]
     InvalidHome(PathBuf),
 }
 
 #[derive(Debug, Clone)]
+/// Reads a Codex home: session rollout logs, and the signed-in account.
 pub struct CodexSessionAdapter {
     codex_home: PathBuf,
     fingerprint_salt: Option<String>,
@@ -52,6 +60,8 @@ pub struct CodexSessionAdapter {
 }
 
 impl CodexSessionAdapter {
+    /// An adapter for `codex_home`, with no fingerprint salt and no account
+    /// rotation assumed.
     pub fn new(codex_home: impl Into<PathBuf>) -> Self {
         Self {
             codex_home: codex_home.into(),
@@ -85,6 +95,7 @@ impl CodexSessionAdapter {
         self
     }
 
+    /// The home this adapter reads.
     pub fn codex_home(&self) -> &Path {
         &self.codex_home
     }
@@ -96,10 +107,12 @@ impl CodexSessionAdapter {
         account::read_official_account(&self.codex_home, salt)
     }
 
+    /// Where rollout logs live inside the home.
     pub fn sessions_dir(&self) -> PathBuf {
         self.codex_home.join("sessions")
     }
 
+    /// Whether this home holds a session directory.
     pub fn detect_sync(&self) -> Result<DetectionResult, CodexAdapterError> {
         let sessions_dir = self.sessions_dir();
         let detected = sessions_dir.is_dir();
@@ -116,6 +129,10 @@ impl CodexSessionAdapter {
         })
     }
 
+    /// Read everything new since `cursors` and return it as one batch.
+    ///
+    /// Files are read from their stored offset, so a repeated call over
+    /// unchanged input yields no events.
     pub fn import_history_sync(
         &self,
         cursors: &HashMap<String, ImportCursor>,
@@ -183,6 +200,7 @@ impl CodexSessionAdapter {
         Ok(batch)
     }
 
+    /// Current health of this source.
     pub fn health_sync(&self) -> SourceHealth {
         let detected = self.sessions_dir().is_dir();
         SourceHealth {
@@ -1193,6 +1211,7 @@ fn adapter_error(error: CodexAdapterError) -> AdapterError {
     }
 }
 
+/// The platform's default Codex home, if the environment names one.
 pub fn default_codex_home() -> Option<PathBuf> {
     #[cfg(windows)]
     {

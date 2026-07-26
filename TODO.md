@@ -8,7 +8,7 @@
 |---|---|---|
 | 行覆盖率（cargo llvm-cov, workspace） | 77.63% → **85.92%** ✅ | ≥ 85% |
 | clippy 警告（`-D warnings`） | 0 | 0 |
-| `missing_docs` 待补项 | 436 → **162** | 0 |
+| `missing_docs` 待补项 | 436 → **0** ✅ | 0 |
 | README 与代码一致 | 否 → **是** | 是 |
 
 各文件行覆盖率：`apps/desktop/src-tauri/src/lib.rs` 10.93%、`crates/core` 67.77%、
@@ -41,9 +41,8 @@
 - [ ] **M3 · `web.rs` 覆盖率 73.44% → ≥85%**（影响：`apps/desktop/src-tauri/src/web.rs`）
       187 行未覆盖：404/405 分支、静态文件 content-type、请求体超限、畸形请求行。
 
-- [ ] **M4 · storage / core / 适配器补全 162 项文档注释**（影响：5 个 crate）
-      H3 之外剩余：storage 49、core 65、codex-session 14+6、claude-session 14、
-      cockpit 13、cc-switch 12。
+- [x] **M4 · 其余 crate 补全 162 项文档注释** — 见 DONE.md。所有 crate 已开启
+      `#![warn(missing_docs)]`，新增未文档化的公开项会构建失败。
 
 - [ ] **M5 · 拆分超长函数**（影响：4 个文件）
       `codex-session::import_file` 256 行、`claude-session::import_file` 203 行、

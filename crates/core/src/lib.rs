@@ -3,6 +3,7 @@
 //! The core owns the SQLite connection, the Codex and Claude incremental
 //! importers, and a small pre-aggregated summary. UI surfaces only call query
 //! methods on this type; they never scan source files or open SQLite.
+#![warn(missing_docs)]
 
 use std::{
     path::PathBuf,
@@ -43,18 +44,34 @@ use tokenbuddy_storage::{Database, ImportStats, StorageError};
 
 type SummaryListener = Arc<dyn Fn(QuickSummary) + Send + Sync>;
 
+/// How to start the Core.
+///
+/// Paths given here are only defaults: a value already stored in the settings
+/// wins, so a user's explicit choice is never overwritten by platform detection
+/// on the next launch.
 #[derive(Debug, Clone)]
 pub struct CoreConfig {
+    /// Where the SQLite database lives. Parent directories are created.
     pub database_path: PathBuf,
+    /// Codex home to use when the settings have none.
     pub codex_home: Option<PathBuf>,
+    /// Claude home to use when the settings have none.
     pub claude_home: Option<PathBuf>,
+    /// CC-Switch database to use when the settings have none.
     pub cc_switch_db: Option<PathBuf>,
+    /// Cockpit database to use when the settings have none.
     pub cockpit_db: Option<PathBuf>,
+    /// How often to import when no filesystem event arrives. This is the safety
+    /// net for filesystems that do not deliver notifications, not the primary
+    /// path.
     pub poll_interval: Duration,
+    /// Whether to register native filesystem watchers. Tests disable them to
+    /// exercise the polling fallback deterministically.
     pub enable_file_watcher: bool,
 }
 
 impl CoreConfig {
+    /// A configuration with the default poll interval and watching enabled.
     pub fn new(database_path: impl Into<PathBuf>, codex_home: Option<PathBuf>) -> Self {
         Self {
             database_path: database_path.into(),
@@ -70,48 +87,73 @@ impl CoreConfig {
         }
     }
 
+    /// Set the fallback Claude home.
     pub fn with_claude_home(mut self, claude_home: Option<PathBuf>) -> Self {
         self.claude_home = claude_home;
         self
     }
 
+    /// Set the fallback CC-Switch database path.
     pub fn with_cc_switch_db(mut self, cc_switch_db: Option<PathBuf>) -> Self {
         self.cc_switch_db = cc_switch_db;
         self
     }
 
+    /// Set the fallback Cockpit database path.
     pub fn with_cockpit_db(mut self, cockpit_db: Option<PathBuf>) -> Self {
         self.cockpit_db = cockpit_db;
         self
     }
 }
 
+/// Anything that can go wrong at the Core boundary.
 #[derive(Debug, Error)]
 pub enum CoreError {
+    /// The database rejected a read or write.
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
+    /// An adapter failed. Carried as text so each adapter keeps its own error
+    /// type private.
     #[error("adapter error: {0}")]
     Adapter(String),
+    /// A lock was poisoned by a panic in another thread; the named guard says
+    /// which one.
     #[error("core lock is poisoned: {0}")]
     Lock(&'static str),
+    /// The background worker thread could not be spawned.
     #[error("failed to start core worker: {0}")]
     Worker(#[from] std::io::Error),
+    /// The worker did not exit when asked.
     #[error("core worker did not stop cleanly")]
     WorkerDidNotStop,
+    /// The worker did not signal readiness within the startup budget.
     #[error("core worker did not become ready")]
     WorkerNotReady,
 }
 
+/// What one import pass did, summed across every source.
+///
+/// The counts are what makes idempotence observable: a second pass over
+/// unchanged input must report zero insertions.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ImportReport {
+    /// New usage events stored.
     pub inserted_events: u64,
+    /// Events already present, recognised by their hash.
     pub duplicate_events: u64,
+    /// Sessions created or refreshed.
     pub upserted_sessions: u64,
+    /// Cursors advanced.
     pub updated_cursors: u64,
+    /// Accounts created or refreshed.
     pub upserted_accounts: u64,
+    /// New quota readings stored.
     pub inserted_quota_snapshots: u64,
+    /// Source records that could not be parsed.
     pub skipped_records: usize,
+    /// Events deleted by the retention window.
     pub pruned_events: u64,
+    /// Anything the user should know about this pass, joined into one message.
     pub warning: Option<String>,
 }
 
@@ -171,6 +213,12 @@ impl CoreControl {
     }
 }
 
+/// The single long-lived collector every surface shares.
+///
+/// One instance owns the database connection, the import worker, and the tray
+/// summary. Panels call query methods on it; they never scan a source file or
+/// open SQLite themselves, so opening a second panel cannot double-count
+/// anything (spec §4.1).
 pub struct Core {
     database: Mutex<Database>,
     import_lock: Mutex<()>,
@@ -185,6 +233,13 @@ pub struct Core {
 }
 
 impl Core {
+    /// Open the database, import once synchronously, then start the background
+    /// worker.
+    ///
+    /// The first pass is synchronous so the tray shows real numbers as soon as
+    /// it appears rather than "starting" for a few seconds. Returns once the
+    /// worker has registered its watchers, so an edit made immediately after is
+    /// not missed.
     pub fn start(config: CoreConfig) -> Result<Arc<Self>, CoreError> {
         let database = Database::open(&config.database_path)?;
         let mut settings = database.get_app_settings()?;
@@ -273,6 +328,8 @@ impl Core {
         Ok(core)
     }
 
+    /// The current tray summary. A cheap clone of pre-aggregated state — no
+    /// query runs here.
     pub fn quick_summary(&self) -> Result<QuickSummary, CoreError> {
         self.summary
             .read()
@@ -280,6 +337,9 @@ impl Core {
             .map_err(|_| CoreError::Lock("summary"))
     }
 
+    /// Register a callback invoked whenever the summary actually changes.
+    ///
+    /// Only real changes notify, so the tray is not redrawn on every poll.
     pub fn add_summary_listener<F>(&self, listener: F) -> Result<(), CoreError>
     where
         F: Fn(QuickSummary) + Send + Sync + 'static,
@@ -291,6 +351,7 @@ impl Core {
         Ok(())
     }
 
+    /// Import now, optionally pointing Codex at a new home first.
     pub fn rescan_codex(&self, codex_home: Option<PathBuf>) -> Result<ImportReport, CoreError> {
         if let Some(codex_home) = codex_home {
             self.set_codex_home(Some(codex_home))?;
@@ -298,6 +359,7 @@ impl Core {
         self.refresh_once()
     }
 
+    /// Import now, optionally pointing Claude Code at a new home first.
     pub fn rescan_claude(&self, claude_home: Option<PathBuf>) -> Result<ImportReport, CoreError> {
         if let Some(claude_home) = claude_home {
             self.set_claude_home(Some(claude_home))?;
@@ -305,6 +367,7 @@ impl Core {
         self.refresh_once()
     }
 
+    /// Import now, optionally pointing CC-Switch at a new database first.
     pub fn rescan_cc_switch(
         &self,
         cc_switch_db: Option<PathBuf>,
@@ -315,6 +378,8 @@ impl Core {
         self.refresh_once()
     }
 
+    /// Point the CC-Switch adapter at a database, or `None` to disable it.
+    /// Persists the choice and wakes the worker.
     pub fn set_cc_switch_db(&self, cc_switch_db: Option<PathBuf>) -> Result<(), CoreError> {
         let mut settings = self.get_app_settings()?;
         settings.cc_switch_db_path = cc_switch_db
@@ -329,6 +394,7 @@ impl Core {
         Ok(())
     }
 
+    /// The configured CC-Switch database, if any.
     pub fn cc_switch_db(&self) -> Result<Option<PathBuf>, CoreError> {
         self.cc_switch_db
             .read()
@@ -336,6 +402,7 @@ impl Core {
             .map_err(|_| CoreError::Lock("CC-Switch database"))
     }
 
+    /// Whether the configured CC-Switch database is actually there.
     pub fn detect_cc_switch_path(&self) -> Result<DetectionResult, CoreError> {
         let Some(db_path) = self.cc_switch_db()? else {
             return Ok(DetectionResult {
@@ -351,6 +418,7 @@ impl Core {
             .map_err(|error| CoreError::Adapter(error.to_string()))
     }
 
+    /// Import now, optionally pointing Cockpit at a new database first.
     pub fn rescan_cockpit(&self, cockpit_db: Option<PathBuf>) -> Result<ImportReport, CoreError> {
         if let Some(cockpit_db) = cockpit_db {
             self.set_cockpit_db(Some(cockpit_db))?;
@@ -358,6 +426,7 @@ impl Core {
         self.refresh_once()
     }
 
+    /// Point the Cockpit adapter at a database, or `None` to disable it.
     pub fn set_cockpit_db(&self, cockpit_db: Option<PathBuf>) -> Result<(), CoreError> {
         let mut settings = self.get_app_settings()?;
         settings.cockpit_path = cockpit_db
@@ -372,6 +441,7 @@ impl Core {
         Ok(())
     }
 
+    /// The configured Cockpit database, if any.
     pub fn cockpit_db(&self) -> Result<Option<PathBuf>, CoreError> {
         self.cockpit_db
             .read()
@@ -379,6 +449,7 @@ impl Core {
             .map_err(|_| CoreError::Lock("Cockpit database"))
     }
 
+    /// Whether the configured Cockpit database is actually there.
     pub fn detect_cockpit_path(&self) -> Result<DetectionResult, CoreError> {
         let Some(db_path) = self.cockpit_db()? else {
             return Ok(DetectionResult {
@@ -394,6 +465,7 @@ impl Core {
             .map_err(|error| CoreError::Adapter(error.to_string()))
     }
 
+    /// Point the Codex adapter at a home, or `None` to disable it.
     pub fn set_codex_home(&self, codex_home: Option<PathBuf>) -> Result<(), CoreError> {
         let mut settings = self.get_app_settings()?;
         settings.codex_home = codex_home
@@ -408,6 +480,7 @@ impl Core {
         Ok(())
     }
 
+    /// The configured Codex home, if any.
     pub fn codex_home(&self) -> Result<Option<PathBuf>, CoreError> {
         self.codex_home
             .read()
@@ -415,6 +488,7 @@ impl Core {
             .map_err(|_| CoreError::Lock("Codex home"))
     }
 
+    /// Point the Claude Code adapter at a home, or `None` to disable it.
     pub fn set_claude_home(&self, claude_home: Option<PathBuf>) -> Result<(), CoreError> {
         let mut settings = self.get_app_settings()?;
         settings.claude_home = claude_home
@@ -429,6 +503,7 @@ impl Core {
         Ok(())
     }
 
+    /// The configured Claude home, if any.
     pub fn claude_home(&self) -> Result<Option<PathBuf>, CoreError> {
         self.claude_home
             .read()
@@ -436,16 +511,23 @@ impl Core {
             .map_err(|_| CoreError::Lock("Claude Home"))
     }
 
+    /// Whether the worker is still collecting.
     pub fn is_running(&self) -> bool {
         !self.control.stop.load(Ordering::SeqCst)
     }
 
+    /// The persisted settings.
     pub fn get_app_settings(&self) -> Result<AppSettings, CoreError> {
         self.database_lock()?
             .get_app_settings()
             .map_err(CoreError::from)
     }
 
+    /// Replace the settings and reconfigure every source in one step.
+    ///
+    /// A source the new settings leave unset is cleared, not carried over: the
+    /// settings are the whole truth, so a path removed in the UI stops being
+    /// read.
     pub fn update_app_settings(&self, settings: AppSettings) -> Result<(), CoreError> {
         self.database_lock()?.save_app_settings(&settings)?;
         *self
@@ -470,18 +552,21 @@ impl Core {
         Ok(())
     }
 
+    /// Providers with their aggregates, for the Providers page.
     pub fn list_providers(&self) -> Result<Vec<tokenbuddy_domain::ProviderSummary>, CoreError> {
         self.database_lock()?
             .list_providers()
             .map_err(CoreError::from)
     }
 
+    /// Accounts with their provider and newest quota window.
     pub fn list_accounts(&self) -> Result<Vec<tokenbuddy_domain::AccountSummary>, CoreError> {
         self.database_lock()?
             .list_accounts()
             .map_err(CoreError::from)
     }
 
+    /// Quota readings, newest first, optionally for one account.
     pub fn list_quota_snapshots(
         &self,
         account_id: Option<&str>,
@@ -492,6 +577,7 @@ impl Core {
             .map_err(CoreError::from)
     }
 
+    /// Whether the configured Codex home holds a session directory.
     pub fn detect_codex_path(&self) -> Result<DetectionResult, CoreError> {
         let Some(home) = self.codex_home()? else {
             return Ok(DetectionResult {
@@ -507,6 +593,7 @@ impl Core {
             .map_err(|error| CoreError::Adapter(error.to_string()))
     }
 
+    /// Whether the configured Claude home holds a projects directory.
     pub fn detect_claude_path(&self) -> Result<DetectionResult, CoreError> {
         let Some(home) = self.claude_home()? else {
             return Ok(DetectionResult {
@@ -522,6 +609,7 @@ impl Core {
             .map_err(|error| CoreError::Adapter(error.to_string()))
     }
 
+    /// Totals over an explicit window.
     pub fn dashboard_summary(
         &self,
         period_start: DateTime<Utc>,
@@ -532,10 +620,13 @@ impl Core {
             .map_err(CoreError::from)
     }
 
+    /// Totals for the user's local calendar day.
     pub fn today_dashboard_summary(&self) -> Result<DashboardSummary, CoreError> {
         self.dashboard_summary_filtered(UsageFilters::default())
     }
 
+    /// Totals over the filtered set, defaulting to the local day when the
+    /// filters name no window — the same "today" the tray uses.
     pub fn dashboard_summary_filtered(
         &self,
         mut filters: UsageFilters,
@@ -578,6 +669,7 @@ impl Core {
             .map_err(CoreError::from)
     }
 
+    /// One page of sessions with their totals.
     pub fn list_sessions(
         &self,
         filters: &UsageFilters,
@@ -589,12 +681,14 @@ impl Core {
             .map_err(CoreError::from)
     }
 
+    /// One session with its request-level timeline, or `None` if unknown.
     pub fn get_session_detail(&self, session_id: &str) -> Result<Option<SessionDetail>, CoreError> {
         self.database_lock()?
             .get_session_detail(session_id)
             .map_err(CoreError::from)
     }
 
+    /// One page of usage events, optionally scoped to a session.
     pub fn list_usage_events(
         &self,
         session_id: Option<&str>,
@@ -606,6 +700,7 @@ impl Core {
             .map_err(CoreError::from)
     }
 
+    /// One page of usage events narrowed by the shared filters.
     pub fn list_usage_events_filtered(
         &self,
         session_id: Option<&str>,
@@ -618,6 +713,8 @@ impl Core {
             .map_err(CoreError::from)
     }
 
+    /// Render the filtered events as `csv` or `json`. Unknown formats are
+    /// rejected rather than silently falling back.
     pub fn export_usage(
         &self,
         format: &str,
@@ -628,12 +725,16 @@ impl Core {
             .map_err(CoreError::from)
     }
 
+    /// Every configured source with its health.
     pub fn list_sources(&self) -> Result<Vec<SourceRecord>, CoreError> {
         self.database_lock()?
             .list_sources()
             .map_err(CoreError::from)
     }
 
+    /// Stop collecting and join the worker.
+    ///
+    /// Safe to call more than once; the second call is a no-op.
     pub fn shutdown(&self) -> Result<(), CoreError> {
         self.control.request_stop();
         let worker = self

@@ -15,11 +15,17 @@ use std::{fs, path::Path};
 use serde_json::Value;
 use tokenbuddy_domain::{AccountRecord, LauncherKind, ProviderRecord, account_fingerprint};
 
+/// File inside the Codex home that names the signed-in identity.
 pub const AUTH_FILENAME: &str = "auth.json";
+/// Provider that owns these accounts.
 pub const PROVIDER_ID: &str = "openai";
+/// Vendor family for grouping.
 pub const PROVIDER_FAMILY: &str = "openai";
+/// Provider name shown in the UI.
 pub const PROVIDER_DISPLAY_NAME: &str = "OpenAI";
+/// Auth mode recorded for a ChatGPT OAuth login.
 pub const AUTH_MODE_CHATGPT: &str = "chatgpt";
+/// Auth mode recorded for a plain API key.
 pub const AUTH_MODE_API_KEY: &str = "api_key";
 
 /// The OpenAI provider row that owns the official account. Emitted alongside the

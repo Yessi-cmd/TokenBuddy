@@ -21,13 +21,21 @@ use tokenbuddy_domain::{AppKind, PrecisionLevel, UsageFilters};
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
+/// Whether the optional local web panel is running, and where to reach it.
 #[derive(Debug, Clone, Serialize)]
 pub struct LocalWebApiStatus {
+    /// Whether the server is listening.
     pub running: bool,
+    /// Address to open in a browser.
     pub url: Option<String>,
+    /// Every loopback address it answers on, IPv4 and IPv6.
     pub loopback_urls: Vec<String>,
 }
 
+/// The on-demand loopback HTTP server backing the browser panel.
+///
+/// Bound to loopback only, so the panel is never reachable from the network.
+/// Dropping it stops the worker.
 pub struct LocalWebServer {
     url: String,
     loopback_urls: Vec<String>,
@@ -35,6 +43,8 @@ pub struct LocalWebServer {
     worker: Option<JoinHandle<()>>,
 }
 
+/// Applies the autostart setting, injected by the shell so this module needs no
+/// Tauri handle of its own.
 pub type AutostartCallback = Arc<dyn Fn(bool) -> Result<(), String> + Send + Sync>;
 
 impl LocalWebServer {
