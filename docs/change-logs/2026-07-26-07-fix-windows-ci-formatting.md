@@ -23,8 +23,8 @@ Prevent the Windows GitHub Actions runner from converting repository text files 
 - `pnpm check:rust` passed.
 - `pnpm --filter @tokenbuddy/desktop tauri build --debug --no-bundle` passed.
 - `git diff --check` passed.
-- Pending: rerun GitHub Actions on a commit containing this change.
+- GitHub Actions run [30181703574](https://github.com/Yessi-cmd/TokenBuddy/actions/runs/30181703574) passed on both `macos-15` and `windows-latest`.
 
 ## Remaining limitations
 
-- The Windows runner must be rerun to confirm the original CI failure is resolved in the hosted environment.
+- GitHub Actions reports a non-blocking warning that several actions still target Node.js 20 while the runner forces Node.js 24; this is unrelated to the formatting failure.
