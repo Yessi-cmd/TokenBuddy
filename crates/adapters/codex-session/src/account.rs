@@ -13,8 +13,7 @@
 use std::{fs, path::Path};
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use tokenbuddy_domain::{AccountRecord, LauncherKind, ProviderRecord};
+use tokenbuddy_domain::{AccountRecord, LauncherKind, ProviderRecord, account_fingerprint};
 
 pub const AUTH_FILENAME: &str = "auth.json";
 pub const PROVIDER_ID: &str = "openai";
@@ -64,7 +63,7 @@ fn chatgpt_account(value: &Value, salt: &str) -> Option<AccountRecord> {
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .or_else(|| claim_string(claims.as_ref(), "chatgpt_account_id"))?;
-    let fingerprint = fingerprint(salt, &account_id);
+    let fingerprint = account_fingerprint(salt, &account_id);
     Some(AccountRecord {
         id: account_row_id(AUTH_MODE_CHATGPT, &fingerprint),
         provider_id: PROVIDER_ID.to_owned(),
@@ -82,7 +81,7 @@ fn api_key_account(value: &Value, salt: &str) -> Option<AccountRecord> {
         .get("OPENAI_API_KEY")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())?;
-    let fingerprint = fingerprint(salt, api_key);
+    let fingerprint = account_fingerprint(salt, api_key);
     Some(AccountRecord {
         id: account_row_id(AUTH_MODE_API_KEY, &fingerprint),
         provider_id: PROVIDER_ID.to_owned(),
@@ -97,14 +96,6 @@ fn api_key_account(value: &Value, salt: &str) -> Option<AccountRecord> {
 
 fn account_row_id(auth_mode: &str, fingerprint: &str) -> String {
     format!("{PROVIDER_ID}:{auth_mode}:{}", &fingerprint[..16])
-}
-
-fn fingerprint(salt: &str, secret: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(salt.as_bytes());
-    hasher.update([0x00]);
-    hasher.update(secret.as_bytes());
-    format!("{:x}", hasher.finalize())
 }
 
 /// Claims live either at the payload root or inside one of the namespaced

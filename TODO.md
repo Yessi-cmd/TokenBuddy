@@ -24,11 +24,8 @@
 - [x] **H1 · 桌面壳覆盖率 10.93% → 49.34%** — 见 DONE.md。剩余未覆盖集中在 `run()` 与
       托盘/窗口生命周期回调，需真实运行时，只能靠真机验收。
 
-- [ ] **H2 · 抽取 cc-switch / cockpit 重复的只读 SQLite helper**（影响：两个适配器 + 新增内部 crate）
-      `table_exists`、`column_set`、`column_names`、`string_col`、`int_col`、`epoch_to_utc`、
-      `resolve_db_path` 七个函数在两个适配器里逐字重复。注意：只抽取"如何安全读一个陌生
-      SQLite"的机制，各适配器的表名/列名/语义必须留在各自 crate 内，否则违反 AGENTS.md
-      「一个适配器的 schema 变化不得影响另一个」。
+- [x] **H2 · 抽取只读 SQLite 读取机制** — 见 DONE.md。新 crate `tokenbuddy-sqlite-source`，
+      +55/−140 行。`resolve_db_path` 两边语义不同，按设计保留在各自适配器。
 
 - [ ] **H3 · `crates/domain` 补全 274 项文档注释**（影响：`crates/domain/src/lib.rs`）
       domain 是全仓库共享词汇表，也是唯一被所有 crate 依赖的公开接口。补完后开启
@@ -60,8 +57,7 @@
       `web::route_request_with_autostart` 186 行、`desktop::run` 131 行。
       按职责切分，不改变对外行为。
 
-- [ ] **M6 · 合并重复的 `fingerprint` 实现**（影响：`codex-session/account.rs`、`cockpit`）
-      两处逐字相同的盐化 SHA-256。归入 H2 的内部 crate 或 domain。
+- [x] **M6 · 合并重复的 `fingerprint`** — 见 DONE.md。收敛为 `domain::account_fingerprint`。
 
 ## 低优先级
 

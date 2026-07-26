@@ -1,5 +1,5 @@
 [package]
-name = "tokenbuddy-cockpit"
+name = "tokenbuddy-sqlite-source"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,10 +7,6 @@ rust-version.workspace = true
 [dependencies]
 chrono.workspace = true
 rusqlite.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-tokenbuddy-domain.workspace = true
-tokenbuddy-sqlite-source.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

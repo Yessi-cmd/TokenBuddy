@@ -406,6 +406,26 @@ pub struct AccountActivityWindow {
     pub ended_at: DateTime<Utc>,
 }
 
+/// Fingerprint an account identifier or credential for storage (spec §20.2).
+///
+/// This is the only way an account identity is allowed to reach the database:
+/// the raw ChatGPT account id, API key, or OAuth token stays in the adapter that
+/// read it and is dropped. `salt` is the per-install random value kept outside
+/// `AppSettings`, so a copied database cannot be matched back to an account by
+/// hashing a guess — the salt is needed too.
+///
+/// The separator byte keeps `salt + secret` unambiguous: without it, salts and
+/// secrets that concatenate to the same bytes would fingerprint identically.
+pub fn account_fingerprint(salt: &str, secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
+    hasher.update([0x00]);
+    hasher.update(secret.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AccountSummary {
     pub account: AccountRecord,

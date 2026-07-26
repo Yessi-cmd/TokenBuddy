@@ -22,13 +22,15 @@ use std::{
     time::SystemTime,
 };
 
-use chrono::{DateTime, Duration, TimeZone, Utc};
-use rusqlite::{Connection, OpenFlags, Row};
-use sha2::{Digest, Sha256};
+use chrono::{DateTime, Duration, Utc};
+use rusqlite::Connection;
 use thiserror::Error;
 use tokenbuddy_domain::{
     AccountActivityWindow, AccountRecord, AppKind, DetectionResult, ImportBatch, ImportCursor,
-    LauncherKind, ProviderRecord, SourceHealth, SourceRecord,
+    LauncherKind, ProviderRecord, SourceHealth, SourceRecord, account_fingerprint,
+};
+use tokenbuddy_sqlite_source::{
+    column_names, column_set, epoch_to_utc, int_col, open_read_only, string_col, table_exists,
 };
 
 pub const SOURCE_ID: &str = "cockpit";
@@ -124,8 +126,8 @@ impl CockpitAdapter {
                 ..ImportBatch::default()
             });
         }
-        let connection =
-            Connection::open_with_flags(&self.db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        // Read-only: a running Cockpit must never see TokenBuddy in its data.
+        let connection = open_read_only(&self.db_path)?;
 
         let mut batch = ImportBatch {
             source: Some(self.source_record("healthy")),
@@ -183,7 +185,7 @@ impl CockpitAdapter {
         });
 
         for (account_key, mut activity) in account_activity {
-            let fingerprint = fingerprint(salt, &account_key);
+            let fingerprint = account_fingerprint(salt, &account_key);
             let account_id = format!("{SOURCE_ID}:{}", &fingerprint[..16]);
             batch.accounts.push(AccountRecord {
                 id: account_id.clone(),
@@ -365,66 +367,6 @@ fn push_window(
         started_at: start - padding,
         ended_at: end + padding,
     });
-}
-
-fn fingerprint(salt: &str, secret: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(salt.as_bytes());
-    hasher.update([0x00]);
-    hasher.update(secret.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-fn table_exists(connection: &Connection, table: &str) -> Result<bool, CockpitAdapterError> {
-    let count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-        [table],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
-}
-
-fn column_set(
-    connection: &Connection,
-    table: &str,
-) -> Result<HashSet<String>, CockpitAdapterError> {
-    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
-    let mut columns = HashSet::new();
-    for name in rows {
-        columns.insert(name?);
-    }
-    Ok(columns)
-}
-
-fn column_names(statement: &rusqlite::Statement<'_>) -> HashMap<String, usize> {
-    statement
-        .column_names()
-        .into_iter()
-        .enumerate()
-        .map(|(index, name)| (name.to_owned(), index))
-        .collect()
-}
-
-fn string_col(row: &Row<'_>, names: &HashMap<String, usize>, name: &str) -> Option<String> {
-    let index = *names.get(name)?;
-    row.get::<_, Option<String>>(index).ok().flatten()
-}
-
-fn int_col(row: &Row<'_>, names: &HashMap<String, usize>, name: &str) -> Option<i64> {
-    let index = *names.get(name)?;
-    row.get::<_, Option<i64>>(index).ok().flatten()
-}
-
-fn epoch_to_utc(value: i64) -> Option<DateTime<Utc>> {
-    if value <= 0 {
-        return None;
-    }
-    if value > 100_000_000_000 {
-        Utc.timestamp_millis_opt(value).single()
-    } else {
-        Utc.timestamp_opt(value, 0).single()
-    }
 }
 
 fn now() -> DateTime<Utc> {

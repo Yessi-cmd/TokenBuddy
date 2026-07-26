@@ -4,6 +4,14 @@
 
 ## 2026-07-27
 
+- **H2 + M6 · 抽取只读 SQLite 读取机制与账号指纹**（commit 见下）
+  六个逐字重复的 helper 收进新 crate `tokenbuddy-sqlite-source`，`fingerprint` 收进
+  `domain::account_fingerprint`（它承载 §20.2 的隐私约定，与 `AccountRecord` 同处才只有一处
+  定义）。只抽取"如何安全读陌生 SQLite"的机制，表名/列名/语义留在各适配器内，以满足
+  AGENTS.md 的适配器隔离要求；`resolve_db_path` 因两边语义不同而保留。净 +55/−140 行，
+  新 crate 自带 4 项测试（只读拒绝写入、缺失文件不创建、缺列/NULL 不退化成默认值、
+  epoch 秒/毫秒同解且 0 不映射到 1970）。
+
 - **L2 · 修复 loopback 服务丢弃迟到请求**（commit `8b1341e`）
   排查 macOS 偶发的 `Connection reset by peer`，发现不是测试不稳定而是真实缺陷：BSD 语义下
   accept 出的连接继承监听套接字的非阻塞标志，令读超时失效、迟到的请求被当作断开丢弃。

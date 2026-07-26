@@ -25,13 +25,16 @@ use std::{
     time::SystemTime,
 };
 
-use chrono::{DateTime, TimeZone, Utc};
-use rusqlite::{Connection, OpenFlags, Row};
+use chrono::{DateTime, Utc};
+use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokenbuddy_domain::{
     DetectionResult, ImportBatch, ImportCursor, LauncherKind, ProviderRecord,
     SessionProviderAttribution, SourceHealth, SourceRecord,
+};
+use tokenbuddy_sqlite_source::{
+    column_names, column_set, epoch_to_utc, int_col, open_read_only, string_col, table_exists,
 };
 
 pub const SOURCE_ID: &str = "cc-switch";
@@ -123,10 +126,7 @@ impl CcSwitchAdapter {
 
     fn open_readonly(&self) -> Result<Connection, CcSwitchAdapterError> {
         // Open strictly read-only so a running CC-Switch is never disturbed.
-        Ok(Connection::open_with_flags(
-            &self.db_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?)
+        Ok(open_read_only(&self.db_path)?)
     }
 
     fn source_record(&self, status: &str) -> SourceRecord {
@@ -339,59 +339,6 @@ pub fn default_cc_switch_db() -> Option<PathBuf> {
     #[cfg(not(windows))]
     let home = std::env::var_os("HOME");
     home.map(|home| PathBuf::from(home).join(".cc-switch").join(DB_FILENAME))
-}
-
-fn table_exists(connection: &Connection, table: &str) -> Result<bool, CcSwitchAdapterError> {
-    let count: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-        [table],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
-}
-
-fn column_set(
-    connection: &Connection,
-    table: &str,
-) -> Result<HashSet<String>, CcSwitchAdapterError> {
-    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
-    let mut columns = HashSet::new();
-    for name in rows {
-        columns.insert(name?);
-    }
-    Ok(columns)
-}
-
-fn column_names(statement: &rusqlite::Statement<'_>) -> HashMap<String, usize> {
-    statement
-        .column_names()
-        .into_iter()
-        .enumerate()
-        .map(|(index, name)| (name.to_owned(), index))
-        .collect()
-}
-
-fn string_col(row: &Row<'_>, names: &HashMap<String, usize>, name: &str) -> Option<String> {
-    let index = *names.get(name)?;
-    row.get::<_, Option<String>>(index).ok().flatten()
-}
-
-fn int_col(row: &Row<'_>, names: &HashMap<String, usize>, name: &str) -> Option<i64> {
-    let index = *names.get(name)?;
-    row.get::<_, Option<i64>>(index).ok().flatten()
-}
-
-fn epoch_to_utc(value: i64) -> Option<DateTime<Utc>> {
-    if value <= 0 {
-        return None;
-    }
-    // CC-Switch stores whole seconds; tolerate a millisecond source too.
-    if value > 100_000_000_000 {
-        Utc.timestamp_millis_opt(value).single()
-    } else {
-        Utc.timestamp_opt(value, 0).single()
-    }
 }
 
 fn provider_domain_id(key: &(String, String)) -> String {
