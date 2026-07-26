@@ -6,7 +6,7 @@
 
 | 指标 | 当前 | 目标 |
 |---|---|---|
-| 行覆盖率（cargo llvm-cov, workspace） | 77.63% → **83.70%** | ≥ 85% |
+| 行覆盖率（cargo llvm-cov, workspace） | 77.63% → **85.92%** ✅ | ≥ 85% |
 | clippy 警告（`-D warnings`） | 0 | 0 |
 | `missing_docs` 待补项 | 436 → **162** | 0 |
 | README 与代码一致 | 否 → **是** | 是 |
@@ -33,9 +33,7 @@
 
 ## 中优先级
 
-- [ ] **M1 · `crates/core` 覆盖率 67.77% → ≥85%**（影响：`crates/core/src/lib.rs`）
-      330 行未覆盖，集中在错误分支：适配器失败落库、设置更新、四个 detect 入口、
-      watcher 路径推导、保留策略。
+- [x] **M1 · `crates/core` 覆盖率 76.07% → 91.21%** — 见 DONE.md。
 
 - [x] **M2 · `crates/domain` 覆盖率 68% → 92.73%** — 见 DONE.md。补测试时暴露并修复了两个
       真实缺陷（serde 名与存储名不一致、`delta_from` 零增量）。

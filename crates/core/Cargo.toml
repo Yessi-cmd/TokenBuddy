@@ -17,4 +17,6 @@ tokenbuddy-domain.workspace = true
 tokenbuddy-storage.workspace = true
 
 [dev-dependencies]
+# Building read-only fixtures for the launcher adapters' own databases.
+rusqlite.workspace = true
 tempfile.workspace = true

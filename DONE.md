@@ -4,6 +4,13 @@
 
 ## 2026-07-27
 
+- **M1 · Core 配置面与查询面测试**（76.07% → 91.21%，workspace 达 85.92%）
+  新增 `crates/core/tests/core_surface.rs`：设置改动无需重启即生效、四个来源路径可设可清、
+  `update_app_settings` 一次性重配所有来源（未设的会被清空而非沿用）、启动器数据库只加归因
+  不加 Token（CC-Switch 提供真实 Provider、Cockpit 提供账号，事件数仍为会话日志的 2 条）、
+  dashboard/filtered/breakdown 三条查询在同一窗口下结果一致、摘要监听器在变化时被通知。
+  core 的 dev-dependency 增加 rusqlite 用于构造两个启动器的只读 fixture。
+
 - **M2 · domain 契约测试，并修两处缺陷**（68% → 92.73%）
   把枚举投影与纯函数当契约钉住，随即发现：(1) `LauncherKind::CCSwitch` 经 serde 发到前端是
   `c_c_switch`，与存储层和前端类型声明的 `cc_switch` 不一致，任何 CC-Switch 归因的事件在
