@@ -610,7 +610,6 @@ mod tests {
         assert!(resolve_static_file(root.path(), "").is_none());
     }
 
-    #[cfg(unix)]
     #[test]
     fn percent_encoded_absolute_path_cannot_read_outside_the_web_root() {
         let root = tempdir().expect("web root");
@@ -620,16 +619,16 @@ mod tests {
         fs::write(&secret, b"TOP-SECRET").expect("secret");
 
         // Percent-encode the separators so the naive `..`-only check is bypassed,
-        // exactly like the original `GET /%2Fetc%2Fpasswd` exploit.
+        // exactly like the original `GET /%2Fetc%2Fpasswd` exploit. Both
+        // separators are encoded so the same test covers a Windows absolute
+        // path (`C:%5CUsers%5C…`), where path handling differs most.
         let encoded: String = secret
             .to_string_lossy()
             .chars()
-            .map(|character| {
-                if character == '/' {
-                    "%2F".to_owned()
-                } else {
-                    character.to_string()
-                }
+            .map(|character| match character {
+                '/' => "%2F".to_owned(),
+                '\\' => "%5C".to_owned(),
+                _ => character.to_string(),
             })
             .collect();
         let response = String::from_utf8_lossy(&serve_static(root.path(), &encoded)).into_owned();
