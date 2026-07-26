@@ -6,7 +6,7 @@
 
 | 指标 | 当前 | 目标 |
 |---|---|---|
-| 行覆盖率（cargo llvm-cov, workspace） | 77.63% | ≥ 85% |
+| 行覆盖率（cargo llvm-cov, workspace） | 77.63% → **82.83%** | ≥ 85% |
 | clippy 警告（`-D warnings`） | 0 | 0 |
 | `missing_docs` 待补项 | 436 | 0 |
 | README 与代码一致 | 否 | 是 |
@@ -21,10 +21,8 @@
 
 ## 高优先级
 
-- [ ] **H1 · 桌面壳覆盖率 10.93% → ≥60%**（影响：`apps/desktop/src-tauri/src/lib.rs`）
-      717 行未覆盖，占全仓库未覆盖行的 38%，是总覆盖率的最大拖累。纯函数（路径归一化、
-      弹窗定位、托盘文案）已有测试，缺的是 `#[tauri::command]` 包装层与窗口/托盘逻辑。
-      方案：为 tauri 加 `test` feature 的 dev-dependency，用 mock runtime 覆盖命令层。
+- [x] **H1 · 桌面壳覆盖率 10.93% → 49.34%** — 见 DONE.md。剩余未覆盖集中在 `run()` 与
+      托盘/窗口生命周期回调，需真实运行时，只能靠真机验收。
 
 - [ ] **H2 · 抽取 cc-switch / cockpit 重复的只读 SQLite helper**（影响：两个适配器 + 新增内部 crate）
       `table_exists`、`column_set`、`column_names`、`string_col`、`int_col`、`epoch_to_utc`、
@@ -71,10 +69,7 @@
       1900 行的 `App.tsx` 只有 12 个用例，且没有覆盖率工具。需要新增
       `@vitest/coverage-v8` dev 依赖（新增而非升级）。
 
-- [ ] **L2 · 修复 loopback 测试偶发失败**（影响：`web.rs` 测试）
-      macOS CI 上 `local_api_serves_core_data_over_both_loopback_families` 与
-      `quick_summary_http_p95_stays_within_lightweight_entry_budget` 偶发
-      `Connection reset by peer`，重跑即过。
+- [x] **L2 · loopback 偶发失败** — 见 DONE.md。是真实缺陷而非测试问题，已修复并加回归测试。
 
 - [ ] **L3 · `now()` 在 5 处重复定义**（影响：5 个 crate）
       各 3 行，抽取收益低于引入耦合的代价，暂列观察。
