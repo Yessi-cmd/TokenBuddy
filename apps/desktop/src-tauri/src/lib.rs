@@ -1023,3 +1023,317 @@ mod tests {
         assert!(!debug_show_windows());
     }
 }
+
+/// Exercises the `#[tauri::command]` layer itself.
+///
+/// The command functions are the contract the desktop panel actually calls, but
+/// they were previously untested: the unit tests above only reached the pure
+/// helpers around them. Tauri's mock runtime provides a real `State` without a
+/// window server, so every command that only needs state can be driven here —
+/// which also pins the argument defaults (page sizes, empty filters) that the
+/// frontend relies on.
+///
+/// Commands taking an `AppHandle` (`save_export`, `show_main_window`, the
+/// pickers, `quit_tokenbuddy`) are deliberately absent: they are bound to the
+/// real runtime, and `quit_tokenbuddy` would end the test process.
+#[cfg(test)]
+mod command_tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, AtomicU64},
+        },
+    };
+
+    use tauri::{Manager, State};
+    use tempfile::TempDir;
+    use tokenbuddy_core::{Core, CoreConfig};
+    use tokenbuddy_domain::UsageFilters;
+
+    use super::{
+        AppState, detect_cc_switch_path, detect_claude_path, detect_cockpit_path,
+        detect_codex_path, export_usage, get_app_settings, get_dashboard_summary,
+        get_local_web_api_status, get_model_breakdown, get_quick_summary, get_session_detail,
+        list_accounts, list_providers, list_quota_snapshots, list_sessions, list_sources,
+        list_usage_events, rescan_cc_switch, rescan_claude, rescan_cockpit, rescan_codex,
+        start_directory, stop_local_web_api,
+    };
+
+    struct Harness {
+        app: tauri::App<tauri::test::MockRuntime>,
+        _codex_home: TempDir,
+        _database: TempDir,
+    }
+
+    impl Harness {
+        /// A mock app managing a real Core over a sanitized Codex fixture.
+        fn new() -> Self {
+            let codex_home = tempfile::tempdir().expect("codex home");
+            let sessions = codex_home.path().join("sessions");
+            fs::create_dir_all(&sessions).expect("sessions directory");
+            let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../fixtures/codex/simple_session.jsonl");
+            fs::copy(fixture, sessions.join("simple_session.jsonl")).expect("copy fixture");
+
+            let database = tempfile::tempdir().expect("database directory");
+            let core = Core::start(CoreConfig::new(
+                database.path().join("tokenbuddy.sqlite3"),
+                Some(codex_home.path().to_owned()),
+            ))
+            .expect("core starts");
+
+            let app = tauri::test::mock_app();
+            app.manage(AppState {
+                core,
+                web_server: Mutex::new(None),
+                quitting: AtomicBool::new(false),
+                quick_hide_generation: AtomicU64::new(0),
+            });
+            Self {
+                app,
+                _codex_home: codex_home,
+                _database: database,
+            }
+        }
+
+        fn state(&self) -> State<'_, AppState> {
+            self.app.state()
+        }
+
+        fn codex_home(&self) -> PathBuf {
+            self._codex_home.path().to_owned()
+        }
+    }
+
+    #[test]
+    fn read_commands_return_the_core_owned_view_of_the_fixture() {
+        let harness = Harness::new();
+
+        let summary = get_quick_summary(harness.state()).expect("quick summary");
+        assert_eq!(summary.active_app, Some(tokenbuddy_domain::AppKind::Codex));
+        assert_eq!(summary.model.as_deref(), Some("gpt-5-codex"));
+
+        // The dashboard defaults to today's local window when no filter is given.
+        let dashboard = get_dashboard_summary(harness.state(), None).expect("dashboard");
+        assert!(dashboard.period_start < dashboard.period_end);
+
+        let breakdown = get_model_breakdown(harness.state(), None).expect("model breakdown");
+        assert!(
+            breakdown
+                .iter()
+                .all(|usage| usage.app == tokenbuddy_domain::AppKind::Codex)
+        );
+
+        // The fixture holds one session with two usage events.
+        let sessions = list_sessions(harness.state(), None, None, None).expect("sessions");
+        assert_eq!(sessions.total, 1);
+        let session_id = sessions.sessions[0].session.id.clone();
+
+        let detail = get_session_detail(harness.state(), session_id.clone())
+            .expect("session detail")
+            .expect("session exists");
+        assert_eq!(detail.summary.session.id, session_id);
+        assert_eq!(detail.usage_events.len(), 2);
+
+        let events = list_usage_events(harness.state(), None, None, None).expect("usage events");
+        assert_eq!(events.total, 2);
+        let scoped = list_usage_events(harness.state(), Some(session_id), None, None)
+            .expect("scoped usage events");
+        assert_eq!(scoped.total, 2);
+
+        let sources = list_sources(harness.state()).expect("sources");
+        assert!(sources.iter().any(|source| source.id == "codex-session"));
+        assert!(
+            !list_providers(harness.state())
+                .expect("providers")
+                .is_empty()
+        );
+
+        // No account or quota source is configured for this fixture, and the
+        // commands say so with empty results rather than inventing rows.
+        assert!(
+            list_accounts(harness.state())
+                .expect("accounts")
+                .iter()
+                .all(|summary| summary.account.auth_mode == "session_log")
+        );
+        assert!(
+            list_quota_snapshots(harness.state(), None, None)
+                .expect("quotas")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn missing_session_detail_is_absent_rather_than_an_error() {
+        let harness = Harness::new();
+        assert!(
+            get_session_detail(harness.state(), "codex-session:does-not-exist".to_owned())
+                .expect("command succeeds")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn export_commands_cover_both_formats_and_reject_unknown_ones() {
+        let harness = Harness::new();
+
+        let csv = export_usage(harness.state(), "csv".to_owned(), None).expect("csv export");
+        assert_eq!(csv.mime_type, "text/csv;charset=utf-8");
+        assert!(csv.filename.ends_with(".csv"));
+        assert!(csv.content.contains("occurred_at"));
+        // Exports carry no raw payload.
+        assert!(!csv.content.contains("raw_usage_json"));
+
+        let json = export_usage(
+            harness.state(),
+            "json".to_owned(),
+            Some(UsageFilters::default()),
+        )
+        .expect("json export");
+        assert_eq!(json.mime_type, "application/json");
+
+        let rejected = export_usage(harness.state(), "pdf".to_owned(), None);
+        assert!(
+            rejected.is_err(),
+            "unknown formats must not silently fall back"
+        );
+    }
+
+    #[test]
+    fn detection_commands_report_configured_and_missing_sources_explicitly() {
+        let harness = Harness::new();
+        let home = harness.codex_home();
+
+        let codex = detect_codex_path(harness.state(), None).expect("codex detection");
+        assert!(codex.detected);
+        let codex_custom =
+            detect_codex_path(harness.state(), Some(home.to_string_lossy().into_owned()))
+                .expect("codex detection with an explicit path");
+        assert!(codex_custom.detected);
+
+        // Nothing else is configured on this fixture machine, so each source
+        // reports "not found" instead of erroring or claiming success.
+        for detection in [
+            detect_claude_path(harness.state(), None).expect("claude detection"),
+            detect_cc_switch_path(harness.state(), None).expect("cc-switch detection"),
+            detect_cockpit_path(harness.state(), None).expect("cockpit detection"),
+        ] {
+            assert!(!detection.detected);
+        }
+
+        let absent = harness
+            .codex_home()
+            .join("absent")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            !detect_cc_switch_path(harness.state(), Some(absent.clone()))
+                .expect("cc-switch detection with an explicit path")
+                .detected
+        );
+        assert!(
+            !detect_cockpit_path(harness.state(), Some(absent))
+                .expect("cockpit detection with an explicit path")
+                .detected
+        );
+    }
+
+    #[test]
+    fn rescan_commands_are_idempotent_over_the_same_fixture() {
+        let harness = Harness::new();
+
+        // The Core already imported at startup, so a rescan adds nothing.
+        let codex = rescan_codex(harness.state(), None).expect("codex rescan");
+        assert_eq!(codex.inserted_events, 0);
+
+        // Sources that are not configured still return a report rather than an
+        // error — one missing launcher must not break the scan button.
+        for report in [
+            rescan_claude(harness.state(), None).expect("claude rescan"),
+            rescan_cc_switch(harness.state(), None).expect("cc-switch rescan"),
+            rescan_cockpit(harness.state(), None).expect("cockpit rescan"),
+        ] {
+            assert_eq!(report.inserted_events, 0);
+        }
+
+        assert_eq!(
+            list_usage_events(harness.state(), None, None, None)
+                .expect("usage events")
+                .total,
+            2,
+            "repeated scans must not change the event count"
+        );
+    }
+
+    /// `update_app_settings` is intentionally not driven here: it is bound to
+    /// the real runtime and calls `sync_autostart`, which would register a login
+    /// item on the machine running the tests. The Core-level round trip is
+    /// covered in `tokenbuddy-core`; this pins what the read command exposes.
+    #[test]
+    fn the_settings_command_exposes_the_core_configuration() {
+        let harness = Harness::new();
+
+        let settings = get_app_settings(harness.state()).expect("settings");
+        assert_eq!(
+            settings.codex_home.as_deref(),
+            Some(harness.codex_home().to_string_lossy().as_ref())
+        );
+        // Everything the app has not been told about stays unset rather than
+        // defaulting to something that looks configured.
+        assert_eq!(settings.claude_home, None);
+        assert_eq!(settings.cc_switch_db_path, None);
+        assert_eq!(settings.cockpit_path, None);
+        assert_eq!(settings.otel_port, None);
+        assert_eq!(settings.data_retention_days, None);
+        assert!(!settings.proxy_enabled);
+        assert!(!settings.auto_start);
+    }
+
+    #[test]
+    fn the_local_web_api_reports_stopped_until_it_is_started() {
+        let harness = Harness::new();
+
+        let status = get_local_web_api_status(harness.state()).expect("status");
+        assert!(!status.running);
+        assert!(status.url.is_none());
+        assert!(status.loopback_urls.is_empty());
+
+        // Stopping an already-stopped server is not an error.
+        let stopped = stop_local_web_api(harness.state()).expect("stop");
+        assert!(!stopped.running);
+    }
+
+    #[test]
+    fn the_picker_opens_at_the_configured_location_and_ignores_stale_paths() {
+        let directory = tempfile::tempdir().expect("directory");
+        let file = directory.path().join("cc-switch.db");
+        fs::write(&file, b"").expect("file");
+
+        // A directory opens itself; a file opens its parent.
+        assert_eq!(
+            start_directory(Some(directory.path().to_string_lossy().into_owned())),
+            Some(directory.path().to_owned())
+        );
+        assert_eq!(
+            start_directory(Some(file.to_string_lossy().into_owned())),
+            Some(directory.path().to_owned())
+        );
+        // A path that no longer exists falls back to the system default rather
+        // than failing the picker.
+        assert_eq!(
+            start_directory(Some(
+                directory
+                    .path()
+                    .join("gone/deeper")
+                    .to_string_lossy()
+                    .into_owned()
+            )),
+            None
+        );
+        assert_eq!(start_directory(None), None);
+        assert_eq!(start_directory(Some("   ".to_owned())), None);
+    }
+}
