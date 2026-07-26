@@ -1,7 +1,7 @@
 mod web;
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::{
         Arc, Mutex,
@@ -127,6 +127,37 @@ fn list_providers(
     state: State<'_, AppState>,
 ) -> Result<Vec<tokenbuddy_domain::ProviderSummary>, String> {
     state.core.list_providers().map_err(core_error)
+}
+
+#[tauri::command]
+fn list_accounts(
+    state: State<'_, AppState>,
+) -> Result<Vec<tokenbuddy_domain::AccountSummary>, String> {
+    state.core.list_accounts().map_err(core_error)
+}
+
+/// Native directory picker for the Settings page. `None` means the user
+/// cancelled — never an error, and never a silent change to the stored path.
+///
+/// Only the desktop shell can show a system dialog; the loopback web panel
+/// keeps its text field, which is why this is a Tauri command with no `/api`
+/// counterpart.
+#[tauri::command]
+async fn pick_directory(
+    app: AppHandle,
+    title: Option<String>,
+    start_at: Option<String>,
+) -> Result<Option<String>, String> {
+    pick_path(app, title, start_at, PickKind::Directory).await
+}
+
+#[tauri::command]
+async fn pick_file(
+    app: AppHandle,
+    title: Option<String>,
+    start_at: Option<String>,
+) -> Result<Option<String>, String> {
+    pick_path(app, title, start_at, PickKind::File).await
 }
 
 #[tauri::command]
@@ -370,6 +401,67 @@ fn quit_tokenbuddy(app: AppHandle, state: State<'_, AppState>) -> Result<(), Str
     state.core.shutdown().map_err(core_error)?;
     app.exit(0);
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickKind {
+    Directory,
+    File,
+}
+
+async fn pick_path(
+    app: AppHandle,
+    title: Option<String>,
+    start_at: Option<String>,
+    kind: PickKind,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+
+    let mut builder = app.dialog().file();
+    if let Some(title) = title {
+        builder = builder.set_title(title);
+    }
+    if let Some(directory) = start_directory(start_at) {
+        builder = builder.set_directory(directory);
+    }
+    if kind == PickKind::File {
+        builder = builder
+            .add_filter("SQLite 数据库", &["db", "sqlite", "sqlite3"])
+            .add_filter("所有文件", &["*"]);
+    }
+
+    // The picker answers on the UI thread through a callback. Hand the result
+    // back over a one-slot channel with a non-blocking send, so neither the UI
+    // thread nor this task ever blocks the other.
+    let (sender, mut receiver) = tauri::async_runtime::channel::<Option<FilePath>>(1);
+    let deliver = move |picked: Option<FilePath>| {
+        let _ = sender.try_send(picked);
+    };
+    match kind {
+        PickKind::Directory => builder.pick_folder(deliver),
+        PickKind::File => builder.pick_file(deliver),
+    }
+
+    let picked = receiver
+        .recv()
+        .await
+        .ok_or_else(|| "文件选择器没有返回结果".to_owned())?;
+    Ok(picked
+        .and_then(|path| path.into_path().ok())
+        .map(|path| path.to_string_lossy().into_owned()))
+}
+
+/// Open the picker where the user already pointed TokenBuddy: the configured
+/// directory, or the parent of the configured file. A path that no longer exists
+/// is ignored so the dialog falls back to the system default instead of failing.
+fn start_directory(start_at: Option<String>) -> Option<PathBuf> {
+    let path = normalized_path(start_at)?;
+    if path.is_dir() {
+        return Some(path);
+    }
+    path.parent()
+        .filter(|parent| parent.is_dir())
+        .map(Path::to_path_buf)
 }
 
 fn normalized_path(path: Option<String>) -> Option<PathBuf> {
@@ -721,6 +813,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let database_path = app
                 .path()
@@ -810,7 +903,10 @@ pub fn run() {
             list_usage_events,
             list_sources,
             list_providers,
+            list_accounts,
             list_quota_snapshots,
+            pick_directory,
+            pick_file,
             get_app_settings,
             update_app_settings,
             detect_codex_path,

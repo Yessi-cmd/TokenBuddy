@@ -108,6 +108,8 @@ pub struct ImportReport {
     pub duplicate_events: u64,
     pub upserted_sessions: u64,
     pub updated_cursors: u64,
+    pub upserted_accounts: u64,
+    pub inserted_quota_snapshots: u64,
     pub skipped_records: usize,
     pub pruned_events: u64,
     pub warning: Option<String>,
@@ -120,6 +122,8 @@ impl From<ImportStats> for ImportReport {
             duplicate_events: stats.duplicate_events,
             upserted_sessions: stats.upserted_sessions,
             updated_cursors: stats.updated_cursors,
+            upserted_accounts: stats.upserted_accounts,
+            inserted_quota_snapshots: stats.inserted_quota_snapshots,
             ..Self::default()
         }
     }
@@ -472,6 +476,12 @@ impl Core {
             .map_err(CoreError::from)
     }
 
+    pub fn list_accounts(&self) -> Result<Vec<tokenbuddy_domain::AccountSummary>, CoreError> {
+        self.database_lock()?
+            .list_accounts()
+            .map_err(CoreError::from)
+    }
+
     pub fn list_quota_snapshots(
         &self,
         account_id: Option<&str>,
@@ -720,7 +730,17 @@ impl Core {
     }
 
     fn import_codex(&self, codex_home: PathBuf, state: &mut RefreshState) -> Result<(), CoreError> {
-        let adapter = CodexSessionAdapter::new(codex_home.clone());
+        // The salt stays in the database and only ever reaches the adapter, so
+        // account fingerprints cannot be recomputed from a copied database
+        // alone (spec §20.2).
+        let salt = self.database_lock()?.local_salt()?;
+        let account_rotation = account_rotation_detected(
+            self.cc_switch_db()?.as_deref(),
+            self.cockpit_db()?.as_deref(),
+        );
+        let adapter = CodexSessionAdapter::new(codex_home.clone())
+            .with_fingerprint_salt(salt)
+            .with_account_rotation(account_rotation);
         let cursors = self.database_lock()?.list_import_cursors(adapter.id())?;
         match adapter.import_history_sync(&cursors) {
             Ok(batch) => self.apply_batch("Codex", batch, state),
@@ -839,6 +859,8 @@ impl Core {
         state.report.duplicate_events += stats.duplicate_events;
         state.report.upserted_sessions += stats.upserted_sessions;
         state.report.updated_cursors += stats.updated_cursors;
+        state.report.upserted_accounts += stats.upserted_accounts;
+        state.report.inserted_quota_snapshots += stats.inserted_quota_snapshots;
         state.report.skipped_records += batch.skipped_records;
         Ok(())
     }
@@ -999,6 +1021,24 @@ fn worker_loop(
     }
 }
 
+/// Whether a launcher that rotates accounts is installed on this machine.
+///
+/// Cockpit rotates ChatGPT accounts for Codex, and CC-Switch can route Codex as
+/// well as Claude. Either one means `auth.json` describes only the account
+/// signed in at this instant, which cannot be projected back onto imported
+/// history — so the Codex adapter reports the account without attributing usage
+/// or quota to it. Deliberately conservative: losing an attribution is
+/// recoverable, publishing a wrong one is not.
+fn account_rotation_detected(
+    cc_switch_db: Option<&std::path::Path>,
+    cockpit_db: Option<&std::path::Path>,
+) -> bool {
+    [cc_switch_db, cockpit_db]
+        .into_iter()
+        .flatten()
+        .any(std::path::Path::is_file)
+}
+
 fn watch_target(home: &std::path::Path, child: &str) -> Option<PathBuf> {
     let data_dir = home.join(child);
     if data_dir.is_dir() {
@@ -1087,7 +1127,29 @@ mod tests {
     use chrono::Utc;
     use tempfile::TempDir;
 
-    use super::{Core, CoreConfig};
+    use super::{Core, CoreConfig, account_rotation_detected};
+
+    #[test]
+    fn an_installed_launcher_marks_the_codex_home_as_rotating_accounts() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let cockpit = directory.path().join("codex_local_access_logs.sqlite");
+        let cc_switch = directory.path().join("cc-switch.db");
+        let missing = directory.path().join("absent.db");
+
+        // Nothing installed, or only a configured-but-absent path: the single
+        // signed-in account can be trusted.
+        assert!(!account_rotation_detected(None, None));
+        assert!(!account_rotation_detected(
+            Some(missing.as_path()),
+            Some(missing.as_path())
+        ));
+
+        fs::write(&cockpit, b"").expect("cockpit db");
+        assert!(account_rotation_detected(None, Some(cockpit.as_path())));
+
+        fs::write(&cc_switch, b"").expect("cc-switch db");
+        assert!(account_rotation_detected(Some(cc_switch.as_path()), None));
+    }
 
     fn fixture_home(fixture: &str) -> (TempDir, std::path::PathBuf) {
         let home = tempfile::tempdir().expect("temporary home");

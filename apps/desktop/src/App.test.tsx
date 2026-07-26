@@ -8,10 +8,12 @@ import {
   getQuickSummary,
   getSessionDetail,
   isDesktopRuntime,
+  listAccounts,
   listProviders,
   listQuotaSnapshots,
   listSessions,
   listSources,
+  pickDirectory,
   showMainWindow,
   updateAppSettings,
 } from "./lib/api";
@@ -27,11 +29,14 @@ vi.mock("./lib/api", () => ({
   getQuickSummary: vi.fn(),
   getSessionDetail: vi.fn(),
   exportUsage: vi.fn(),
+  listAccounts: vi.fn(),
   listProviders: vi.fn(),
   listQuotaSnapshots: vi.fn(),
   listSessions: vi.fn(),
   listSources: vi.fn(),
   openLocalWebApi: vi.fn(),
+  pickDirectory: vi.fn(),
+  pickFile: vi.fn(),
   rescanClaude: vi.fn(),
   rescanCodex: vi.fn(),
   rescanCcSwitch: vi.fn(),
@@ -69,6 +74,7 @@ describe("App", () => {
     vi.mocked(listSources).mockResolvedValue([]);
     vi.mocked(listProviders).mockResolvedValue([]);
     vi.mocked(listQuotaSnapshots).mockResolvedValue([]);
+    vi.mocked(listAccounts).mockResolvedValue([]);
     vi.mocked(getAppSettings).mockResolvedValue({
       codex_home: null,
       claude_home: null,
@@ -236,6 +242,77 @@ describe("App", () => {
     await waitFor(() => {
       expect(screen.getByText("官方额度 Unavailable")).toBeInTheDocument();
     });
+    expect(screen.getByText("账号 Unavailable")).toBeInTheDocument();
     expect(listQuotaSnapshots).toHaveBeenCalled();
+    expect(listAccounts).toHaveBeenCalled();
+  });
+
+  it("shows the official Codex account with its plan and quota window", async () => {
+    vi.mocked(listAccounts).mockResolvedValue([
+      {
+        account: {
+          id: "openai:chatgpt:fixture00000000",
+          provider_id: "openai",
+          display_name: "fixture@example.com",
+          account_fingerprint: "fixture00000000feedfacefeedface",
+          auth_mode: "chatgpt",
+          plan: "pro",
+        },
+        provider_name: "OpenAI",
+        latest_quota: {
+          window_type: "primary_5h",
+          used_percent: 18.75,
+          remaining_percent: 81.25,
+          reset_at: "2026-07-26T11:00:00Z",
+          credits_remaining: null,
+          precision: "correlated",
+        },
+      },
+    ]);
+    window.history.pushState({}, "", "/quotas");
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("fixture@example.com")).toBeInTheDocument();
+    });
+    expect(screen.getByText("OpenAI · ChatGPT 官方登录")).toBeInTheDocument();
+    expect(screen.getByText("pro")).toBeInTheDocument();
+    // The window is shown at the precision it was recorded with, never as
+    // Verified, and the fingerprint is truncated.
+    expect(screen.getByText("primary_5h 18.8% 已用")).toBeInTheDocument();
+    expect(screen.getByText("Correlated")).toBeInTheDocument();
+    expect(screen.getByText("指纹 fixture00000")).toBeInTheDocument();
+  });
+
+  it("fills a settings path from the native picker without saving it", async () => {
+    vi.mocked(isDesktopRuntime).mockReturnValue(true);
+    vi.mocked(pickDirectory).mockResolvedValue("/picked/codex");
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+
+    const browse = await screen.findByRole("button", {
+      name: "Codex Home：浏览",
+    });
+    fireEvent.click(browse);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Codex Home")).toHaveValue("/picked/codex");
+    });
+    expect(pickDirectory).toHaveBeenCalledWith("选择 Codex Home", null);
+    // Picking a path must not write it: saving stays an explicit action.
+    expect(updateAppSettings).not.toHaveBeenCalled();
+  });
+
+  it("keeps the picker out of the browser panel", async () => {
+    vi.mocked(isDesktopRuntime).mockReturnValue(false);
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Codex Home")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: "Codex Home：浏览" }),
+    ).not.toBeInTheDocument();
   });
 });

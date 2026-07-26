@@ -221,6 +221,21 @@ export interface QuotaSnapshot {
   raw_json: Record<string, unknown> | null;
 }
 
+export interface AccountRecord {
+  id: string;
+  provider_id: string;
+  display_name: string | null;
+  account_fingerprint: string;
+  auth_mode: string;
+  plan: string | null;
+}
+
+export interface AccountSummary {
+  account: AccountRecord;
+  provider_name: string | null;
+  latest_quota: QuotaSummary | null;
+}
+
 export interface AppSettings {
   codex_home: string | null;
   claude_home: string | null;
@@ -371,6 +386,27 @@ export function listSources(): Promise<SourceRecord[]> {
 
 export function listProviders(): Promise<ProviderSummary[]> {
   return request<ProviderSummary[]>("list_providers", "/api/providers");
+}
+
+export function listAccounts(): Promise<AccountSummary[]> {
+  return request<AccountSummary[]>("list_accounts", "/api/accounts");
+}
+
+// Desktop-only: native directory picker. Resolves to null when the user
+// cancels. The browser panel has no system dialog, so it keeps its text field.
+export function pickDirectory(
+  title: string,
+  startAt: string | null,
+): Promise<string | null> {
+  return invoke<string | null>("pick_directory", { title, startAt });
+}
+
+// Desktop-only: native file picker, used for the third-party SQLite paths.
+export function pickFile(
+  title: string,
+  startAt: string | null,
+): Promise<string | null> {
+  return invoke<string | null>("pick_file", { title, startAt });
 }
 
 export function listQuotaSnapshots(

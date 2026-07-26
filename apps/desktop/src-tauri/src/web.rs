@@ -245,6 +245,9 @@ fn route_request_with_autostart(
         ("GET", "/api/providers") => core
             .list_providers()
             .map_or_else(api_error, |providers| json_response(200, &providers)),
+        ("GET", "/api/accounts") => core
+            .list_accounts()
+            .map_or_else(api_error, |accounts| json_response(200, &accounts)),
         ("GET", "/api/quotas") => {
             let account_id = query_value(query, "account_id");
             let limit = query_value(query, "limit")

@@ -1996,9 +1996,10 @@ T001 至 T014 是本计划最初定义的第一批任务编号，并不是全部
 [x] Phase 4b：Tray-first 最小闭环（后台 Core、QuickSummary、托盘、轻量弹窗与 loopback API）
 [x] Phase 4b 展示层与采集可靠性补全：共享 SPA 路由、原生文件通知、轮询兜底、loopback `::1` 与 Core 多入口集成测试
 [x] Phase 4b 正确性与 MVP 补全：QuickSummary Core 边界、部分 JSONL 行重试、缺失值聚合、筛选与 CSV/JSON 导出、单实例、自启动和按需 WebView
+[x] Phase 4b 路径选择与 Codex 官方账号：原生目录/文件选择器、`auth.json` 账号身份、官方额度窗口入库
 [ ] Phase 4b 跨平台真机交互补验：Windows 托盘与 macOS/Windows 菜单栏或托盘交互、隐藏窗口持续采集和 Windows CPU/P95
 [ ] Phase 5：OTel
-[ ] Phase 6：CC Switch / Cockpit
+[x] Phase 6：CC Switch / Cockpit（只读 Adapter、Provider/账号归因、Codex 官方额度；代理 usage 导入按防重复计数原则不实现）
 [ ] Phase 7：可选本地代理
 ```
 
@@ -2019,3 +2020,7 @@ Phase 4b 最小闭环已完成：新增独立 `tokenbuddy-core`，由单个后�
 Phase 4b 展示层与采集可靠性实现已完成：Core 使用 `notify` 原生文件事件作为正常唤醒路径，并保留低频轮询兜底；新增 Core 生命周期和多入口共享的集成测试；共享 SPA 已覆盖 `/providers`、`/quotas`、`/settings`，对应 Tauri / loopback 查询契约和显式 `Unavailable` 状态；`QuickSummary` 查询 P95、轻量 HTTP 入口 P95 和 macOS 打包应用空闲 CPU 已完成测量。macOS debug 打包验收已实际打开三个新增路由，关闭完整窗口后保持进程和 Core 存活，并在隐藏窗口期间通过原生事件导入脱敏 fixture 新记录。Windows 真实托盘交互、隐藏窗口持续采集和 CPU/P95 仍需在 Windows 真机或 CI 运行环境补验；macOS 状态栏图标的直接点击仍受当前 Computer Use 无法读取 `SystemUIServer` 状态项的限制，但默认 accessory 启动、完整窗口隐藏和 Core 采集链路已确认。Claude OTel、CC Switch、Cockpit、官方额度数据源和本地代理仍按后续 Phase 实现，本地代理继续不是 Core 或统计功能的前置条件。
 
 Phase 4b 正确性与 MVP 补全已完成：Quick 面板只消费 Core 的 `QuickSummary`，展示活动会话的标题、项目、Provider 和模型；Codex/Claude 导入会保留未完成 JSONL 尾行的 cursor 位置并在追加完成后重试；Session、Provider、Dashboard 和 QuickSummary 聚合在字段缺失时返回 `Unavailable` 而不是把已知事件的部分和冒充完整总数。Dashboard 与 loopback API 已支持日期、应用、Provider、账号、模型、项目、精度和搜索筛选，并可导出不含原始 payload 的 CSV/JSON；Tauri 已接入单实例转发、自启动同步和按需创建 `main`/`quick` WebView，托盘优先启动不再预建完整 Dashboard WebView。Windows 真机安装、自启动和托盘行为仍需在 Windows 环境补验，后续 Phase 的 Claude OTel、CC Switch、Cockpit、官方额度 Adapter 和本地代理未在本批次实现。
+
+Phase 6 与路径选择补全已完成：CC Switch 与 Cockpit 只读 Adapter 已在上一批次接入并只提供 Provider / 账号上下文（按 §6.1 与 §10.1，不导入会与 Session 日志重复计数的代理 usage）。本批次补上 Codex 官方账号与官方额度：只读解析 `<CODEX_HOME>/auth.json`，支持 ChatGPT 登录与 API Key 两种模式，账号身份以每安装随机盐指纹化后入 `accounts`，原始 access token / refresh token / id token / API Key 全程不落库（§20.1、§20.2）；rollout 日志中的 `rate_limits` 作为独立数据类型写入 `quota_snapshots`，窗口按上报长度标注、`reset_at` 由倒计时折算、同一窗口百分比不变时不重复记录，托盘 `QuickSummary` 与额度页因此首次出现真实官方额度窗口。额度精度记为 `Correlated`：百分比来自官方响应，但归属账号是通过 Codex Home 关联得出的，按 §14 以最弱环节定级，绝不显示为 Verified，也绝不从百分比反推 Token（§8.4）。设置页四个数据源路径新增原生目录 / 文件选择器（`tauri-plugin-dialog`），仅桌面壳提供，浏览器面板保留文本输入；选择只填入表单，保存仍是显式操作，取消不修改既有配置。仍未实现：Claude / 其他 Provider 的官方额度数据源、OTel、本地代理；选择器与 Windows 文件过滤器的真机交互验收仍待补。
+
+多账号轮换保护与发布流程已加入：检测到 CC Switch 或 Cockpit 数据库时，Codex 适配器仍上报 `auth.json` 中的官方账号身份，但不再把该账号写入 usage 事件、也不产出额度快照——启动器在多个账号间轮换时，`auth.json` 只描述此刻登录的账号，按它归因会把其他账号的历史算到当前账号头上。判定刻意保守：丢失一次归因可以补回，发布一个错误归因不可以。真正的多账号归因需从 Cockpit `request_logs` 的 `account_id` / `email` 按时间窗关联，尚未实现。同时新增 `.github/workflows/release.yml`，由 `windows-latest` 与 `macos-15` 在 `v*` tag 上产出 `.msi` / `-setup.exe` / `.dmg` 并发布为 pre-release；安装包未签名，Windows 托盘、自启动与路径选择器仍未在真机验证。

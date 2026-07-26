@@ -9,10 +9,13 @@ import {
   getQuickSummary,
   getSessionDetail,
   exportUsage,
+  listAccounts,
   listProviders,
   listQuotaSnapshots,
   listSessions,
   listSources,
+  pickDirectory,
+  pickFile,
   detectCcSwitchPath,
   detectCockpitPath,
   openLocalWebApi,
@@ -24,6 +27,7 @@ import {
   showMainWindow,
   isDesktopRuntime,
   updateAppSettings,
+  type AccountSummary,
   type AppSettings,
   type QuickSummary,
   type DashboardSummary,
@@ -991,14 +995,16 @@ function ProvidersView() {
 
 function QuotasView() {
   const [quotas, setQuotas] = useState<QuotaSnapshot[]>([]);
+  const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
-    void listQuotaSnapshots()
-      .then((nextQuotas) => {
+    void Promise.all([listQuotaSnapshots(), listAccounts()])
+      .then(([nextQuotas, nextAccounts]) => {
         if (active) {
           setQuotas(nextQuotas);
+          setAccounts(nextAccounts);
           setError(null);
         }
       })
@@ -1017,6 +1023,50 @@ function QuotasView() {
       subtitle="额度窗口与原始 Token 分开保存；不会从百分比反推准确 Token。"
     >
       {error ? <p className="notice notice-warning">{error}</p> : null}
+      <section className="panel route-panel" aria-label="已识别账号">
+        <div className="settings-heading">
+          <div>
+            <p className="section-kicker">Accounts</p>
+            <h2>已识别账号</h2>
+          </div>
+        </div>
+        {accounts.length ? (
+          <div className="quota-list">
+            {accounts.map(({ account, provider_name, latest_quota }) => (
+              <article className="quota-row" key={account.id}>
+                <div>
+                  <strong>{account.display_name || "账号 Unavailable"}</strong>
+                  <span>
+                    {provider_name || "Provider Unavailable"} ·{" "}
+                    {authModeLabel(account.auth_mode)}
+                  </span>
+                </div>
+                <div>
+                  <strong>{account.plan || "订阅方案 Unavailable"}</strong>
+                  <span>指纹 {account.account_fingerprint.slice(0, 12)}</span>
+                </div>
+                <div>
+                  <strong>
+                    {latest_quota
+                      ? `${latest_quota.window_type} ${formatPercent(latest_quota.used_percent)} 已用`
+                      : "额度 Unavailable"}
+                  </strong>
+                  <span>
+                    {latest_quota
+                      ? precisionLabel(latest_quota.precision)
+                      : "该账号尚未报告官方额度窗口"}
+                  </span>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            title="账号 Unavailable"
+            description="尚未识别到任何账号；Codex 官方账号需要可读的 auth.json。"
+          />
+        )}
+      </section>
       {quotas.length ? (
         <section className="panel route-panel" aria-label="官方额度快照">
           <div className="quota-list">
@@ -1284,6 +1334,29 @@ function SettingsView() {
     };
   }, []);
 
+  // The picker only fills the field; nothing is written until the user saves,
+  // and cancelling leaves the configured path untouched.
+  async function browse(
+    kind: "directory" | "file",
+    title: string,
+    field: "codex_home" | "claude_home" | "cc_switch_db_path" | "cockpit_path",
+  ) {
+    try {
+      const picked =
+        kind === "directory"
+          ? await pickDirectory(title, settings[field])
+          : await pickFile(title, settings[field]);
+      if (picked) {
+        setSettings((current) => ({ ...current, [field]: picked }));
+        setStatus("路径已选择，尚未保存");
+        setError(null);
+      }
+    } catch (cause) {
+      console.error("打开选择器失败", cause);
+      setError(`无法打开系统选择器：${describeError(cause)}`);
+    }
+  }
+
   async function handleSave() {
     setIsSaving(true);
     try {
@@ -1334,6 +1407,9 @@ function SettingsView() {
               setSettings({ ...settings, codex_home: value })
             }
             placeholder="留空使用系统默认路径"
+            onBrowse={() =>
+              browse("directory", "选择 Codex Home", "codex_home")
+            }
           />
           <SettingsField
             id="settings-claude-home"
@@ -1343,6 +1419,9 @@ function SettingsView() {
               setSettings({ ...settings, claude_home: value })
             }
             placeholder="留空使用系统默认路径"
+            onBrowse={() =>
+              browse("directory", "选择 Claude Home", "claude_home")
+            }
           />
           <SettingsField
             id="settings-cc-switch"
@@ -1351,7 +1430,10 @@ function SettingsView() {
             onChange={(value) =>
               setSettings({ ...settings, cc_switch_db_path: value })
             }
-            placeholder="Unavailable（只读 Adapter 尚未启用）"
+            placeholder="选择 cc-switch.db（只读）"
+            onBrowse={() =>
+              browse("file", "选择 CC Switch 数据库", "cc_switch_db_path")
+            }
           />
           <SettingsField
             id="settings-cockpit"
@@ -1360,7 +1442,10 @@ function SettingsView() {
             onChange={(value) =>
               setSettings({ ...settings, cockpit_path: value })
             }
-            placeholder="Unavailable（只读 Adapter 尚未启用）"
+            placeholder="选择 codex_local_access_logs.sqlite（只读）"
+            onBrowse={() =>
+              browse("file", "选择 Cockpit 数据库", "cockpit_path")
+            }
           />
         </div>
         <div className="settings-flags">
@@ -1403,22 +1488,36 @@ function SettingsField({
   value,
   onChange,
   placeholder,
+  onBrowse,
 }: {
   id: string;
   label: string;
   value: string | null;
   onChange: (value: string) => void;
   placeholder: string;
+  onBrowse?: () => void;
 }) {
   return (
     <label className="settings-field" htmlFor={id}>
       <span>{label}</span>
-      <input
-        id={id}
-        value={value ?? ""}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-      />
+      <div className="settings-field-input">
+        <input
+          id={id}
+          value={value ?? ""}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+        />
+        {onBrowse && isDesktopRuntime() ? (
+          <button
+            className="quiet-button"
+            type="button"
+            onClick={() => void onBrowse()}
+            aria-label={`${label}：浏览`}
+          >
+            浏览…
+          </button>
+        ) : null}
+      </div>
     </label>
   );
 }
@@ -1871,6 +1970,15 @@ function precisionLabel(level: PrecisionLevel): string {
     unavailable: "Unavailable",
   };
   return labels[level];
+}
+
+function authModeLabel(authMode: string): string {
+  const labels: Record<string, string> = {
+    chatgpt: "ChatGPT 官方登录",
+    api_key: "API Key",
+    session_log: "会话日志推断",
+  };
+  return labels[authMode] ?? authMode;
 }
 
 function collectionStatusLabel(

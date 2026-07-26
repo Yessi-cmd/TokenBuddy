@@ -3,6 +3,14 @@
 //! The parser works on sanitized fixtures and never stores prompt, completion,
 //! or source-code bodies. Only stable session metadata and usage fields are
 //! normalized into the shared domain model.
+//!
+//! Besides tokens, the adapter reports two things about the *official* Codex
+//! account: its identity, read from `auth.json` by [`account`], and the official
+//! quota windows Codex records in its rollout logs. Quota stays a separate data
+//! type from token usage (spec §8.4) — a percentage is never turned back into a
+//! token count.
+
+pub mod account;
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -13,14 +21,14 @@ use std::{
     time::SystemTime,
 };
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokenbuddy_domain::{
-    AdapterError, AppKind, DetectionResult, EventSink, ImportBatch, ImportCursor, IngestSource,
-    LauncherKind, NormalizedUsage, PrecisionLevel, SessionRecord, SourceHealth, SourceRecord,
-    UsageAdapter, UsageEvent, WatcherHandle,
+    AccountRecord, AdapterError, AppKind, DetectionResult, EventSink, ImportBatch, ImportCursor,
+    IngestSource, LauncherKind, NormalizedUsage, PrecisionLevel, QuotaSnapshot, SessionRecord,
+    SourceHealth, SourceRecord, UsageAdapter, UsageEvent, WatcherHandle,
 };
 
 pub const SOURCE_ID: &str = "codex-session";
@@ -39,17 +47,53 @@ pub enum CodexAdapterError {
 #[derive(Debug, Clone)]
 pub struct CodexSessionAdapter {
     codex_home: PathBuf,
+    fingerprint_salt: Option<String>,
+    account_rotation: bool,
 }
 
 impl CodexSessionAdapter {
     pub fn new(codex_home: impl Into<PathBuf>) -> Self {
         Self {
             codex_home: codex_home.into(),
+            fingerprint_salt: None,
+            account_rotation: false,
         }
+    }
+
+    /// Declare that a launcher rotates several accounts through this Codex Home
+    /// (Cockpit and CC-Switch both do).
+    ///
+    /// `auth.json` names only the account signed in *right now*, so under
+    /// rotation it cannot say which account served a past request or owns a past
+    /// quota window. The account itself is still reported — it exists and is
+    /// signed in — but usage events and quota windows stay unattributed instead
+    /// of piling every account's history onto whichever one happens to be
+    /// current. Real per-account attribution has to come from the launcher that
+    /// did the routing.
+    #[must_use]
+    pub fn with_account_rotation(mut self, account_rotation: bool) -> Self {
+        self.account_rotation = account_rotation;
+        self
+    }
+
+    /// Supply the per-install salt that turns the account id or API key in
+    /// `auth.json` into a fingerprint (spec §20.2). Without it the adapter
+    /// reports no official account at all rather than hashing without a salt.
+    #[must_use]
+    pub fn with_fingerprint_salt(mut self, salt: impl Into<String>) -> Self {
+        self.fingerprint_salt = Some(salt.into());
+        self
     }
 
     pub fn codex_home(&self) -> &Path {
         &self.codex_home
+    }
+
+    /// The official account behind this Codex home, or `None` when `auth.json`
+    /// is absent, unreadable, or no salt was configured.
+    pub fn official_account(&self) -> Option<AccountRecord> {
+        let salt = self.fingerprint_salt.as_deref()?;
+        account::read_official_account(&self.codex_home, salt)
     }
 
     pub fn sessions_dir(&self) -> PathBuf {
@@ -102,10 +146,18 @@ impl CodexSessionAdapter {
         collect_jsonl_files(&sessions_dir, &mut files)?;
         files.sort();
 
+        let official_account = self.official_account();
+        // Under account rotation the signed-in account is still a fact worth
+        // recording, but it cannot be attached to individual requests.
+        let correlated_account = official_account.as_ref().filter(|_| !self.account_rotation);
         let mut batch = ImportBatch {
             source: Some(self.source_record("healthy")),
             ..ImportBatch::default()
         };
+        if let Some(account) = &official_account {
+            batch.providers.push(account::official_provider());
+            batch.accounts.push(account.clone());
+        }
         if let Some(snapshot) = index_snapshot {
             batch.cursors.push(snapshot.cursor);
         }
@@ -119,9 +171,11 @@ impl CodexSessionAdapter {
                 cursor,
                 &session_titles,
                 session_index_changed,
+                correlated_account,
             )?;
             batch.sessions.extend(parsed.sessions);
             batch.usage_events.extend(parsed.usage_events);
+            batch.quota_snapshots.extend(parsed.quota_snapshots);
             batch.cursors.push(parsed.cursor);
             batch.skipped_records += parsed.skipped_records;
         }
@@ -167,6 +221,7 @@ impl CodexSessionAdapter {
         cursor: Option<&ImportCursor>,
         session_titles: &HashMap<String, String>,
         session_index_changed: bool,
+        official_account: Option<&AccountRecord>,
     ) -> Result<ParsedFile, CodexAdapterError> {
         let metadata = fs::metadata(path)?;
         let file_size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
@@ -219,6 +274,11 @@ impl CodexSessionAdapter {
             )?;
         }
         let mut usage_events = Vec::new();
+        let mut quota_snapshots = Vec::new();
+        // Rollout logs repeat the same rate-limit numbers on every request until
+        // the upstream updates them. Remember the last emitted value per window
+        // so one quota row is kept per actual change, not per request.
+        let mut last_quota = HashMap::<String, String>::new();
         let mut skipped_records = 0;
         let mut offset = start_offset;
         let file = File::open(path)?;
@@ -274,6 +334,23 @@ impl CodexSessionAdapter {
 
             if context.inherited_history {
                 continue;
+            }
+
+            // Official quota windows ride along on the same `token_count` rows
+            // as usage but are stored as their own data type (spec §8.4). They
+            // are only recorded when an official account is known: a quota
+            // window with no owner would be an unattributable percentage.
+            if let Some(account) = official_account
+                && let Some(rate_limits) = find_rate_limits(&value)
+                && let Some(captured_at) = context.timestamp
+            {
+                collect_quota_snapshots(
+                    rate_limits,
+                    captured_at,
+                    &account.id,
+                    &mut last_quota,
+                    &mut quota_snapshots,
+                );
             }
 
             let Some(candidate) = find_usage(&value) else {
@@ -343,7 +420,10 @@ impl CodexSessionAdapter {
                 ingest_source: IngestSource::SessionLog,
                 source_id: SOURCE_ID.to_owned(),
                 provider_id: None,
-                account_id: None,
+                // The session log never names the account, so this is the
+                // account Codex is signed in to now, matched to the session by
+                // Codex Home — a correlation, not a fact the log states.
+                account_id: official_account.map(|account| account.id.clone()),
                 session_id: Some(session_id),
                 parent_session_id,
                 request_id: context.request_id.clone(),
@@ -360,7 +440,11 @@ impl CodexSessionAdapter {
                 precision_token: PrecisionLevel::ExactSession,
                 precision_session: PrecisionLevel::ExactSession,
                 precision_provider: PrecisionLevel::Unavailable,
-                precision_account: PrecisionLevel::Unavailable,
+                precision_account: if official_account.is_some() {
+                    PrecisionLevel::Correlated
+                } else {
+                    PrecisionLevel::Unavailable
+                },
                 raw_event_hash,
                 raw_usage_json,
             });
@@ -382,6 +466,7 @@ impl CodexSessionAdapter {
         Ok(ParsedFile {
             sessions: sessions.into_values().collect(),
             usage_events,
+            quota_snapshots,
             cursor,
             skipped_records,
         })
@@ -490,6 +575,7 @@ impl UsageAdapter for CodexSessionAdapter {
 struct ParsedFile {
     sessions: Vec<SessionRecord>,
     usage_events: Vec<UsageEvent>,
+    quota_snapshots: Vec<QuotaSnapshot>,
     cursor: ImportCursor,
     skipped_records: usize,
 }
@@ -737,6 +823,125 @@ fn update_session(
             session.updated_at = now();
         })
         .or_insert_with(|| incoming.clone());
+}
+
+/// Locate the official rate-limit block. Codex has moved it between the record
+/// root, the event payload, and the token-count info object across versions, so
+/// all known positions are probed and an unknown shape simply yields `None`.
+fn find_rate_limits(value: &Value) -> Option<&Value> {
+    const PATHS: [&[&str]; 4] = [
+        &["rate_limits"],
+        &["payload", "rate_limits"],
+        &["info", "rate_limits"],
+        &["payload", "info", "rate_limits"],
+    ];
+    PATHS.iter().find_map(|path| {
+        let found = path
+            .iter()
+            .try_fold(value, |current, key| current.get(*key))?;
+        found.is_object().then_some(found)
+    })
+}
+
+/// Turn one rate-limit block into quota snapshots, one per reported window.
+///
+/// `last_quota` carries the previously emitted percentages per window within the
+/// same file: Codex repeats the identical numbers on every request until the
+/// upstream updates them, and storing one row per request would bury the actual
+/// changes in duplicates. The countdown field is deliberately excluded from that
+/// comparison — it ticks down on every line while describing the same window.
+fn collect_quota_snapshots(
+    rate_limits: &Value,
+    captured_at: DateTime<Utc>,
+    account_id: &str,
+    last_quota: &mut HashMap<String, String>,
+    output: &mut Vec<QuotaSnapshot>,
+) {
+    let Some(windows) = rate_limits.as_object() else {
+        return;
+    };
+
+    for (name, window) in windows {
+        let Some(fields) = window.as_object() else {
+            continue;
+        };
+        let used_percent = fields.get("used_percent").and_then(Value::as_f64);
+        let remaining_percent = fields
+            .get("remaining_percent")
+            .and_then(Value::as_f64)
+            // Codex reports only the used side. The complement is arithmetic on
+            // a reported percentage, never an inference about token counts,
+            // which spec §8.4 forbids.
+            .or_else(|| {
+                used_percent
+                    .filter(|used| (0.0..=100.0).contains(used))
+                    .map(|used| 100.0 - used)
+            });
+        let resets_in_seconds = fields
+            .get("resets_in_seconds")
+            .and_then(Value::as_i64)
+            .filter(|seconds| *seconds >= 0);
+        if used_percent.is_none() && remaining_percent.is_none() && resets_in_seconds.is_none() {
+            // A window Codex did not report stays Unavailable instead of
+            // becoming an empty row that reads as "0% used".
+            continue;
+        }
+
+        let window_type = window_type(
+            name,
+            fields
+                .get("window_minutes")
+                .and_then(Value::as_i64)
+                .filter(|minutes| *minutes > 0),
+        );
+        let signature = format!("{used_percent:?}|{remaining_percent:?}");
+        if last_quota.get(&window_type) == Some(&signature) {
+            continue;
+        }
+        last_quota.insert(window_type.clone(), signature.clone());
+
+        let id = hash_strings([
+            SOURCE_ID,
+            account_id,
+            window_type.as_str(),
+            captured_at.to_rfc3339().as_str(),
+            signature.as_str(),
+        ]);
+        output.push(QuotaSnapshot {
+            id,
+            account_id: account_id.to_owned(),
+            account_name: None,
+            provider_name: None,
+            captured_at,
+            window_type,
+            used_percent,
+            remaining_percent,
+            reset_at: resets_in_seconds
+                .and_then(|seconds| captured_at.checked_add_signed(Duration::seconds(seconds))),
+            credits_remaining: None,
+            // The percentages come from the upstream rate-limit response, but
+            // the owning account is matched through the Codex Home rather than
+            // stated by the log — the weakest link decides the badge, so this is
+            // Correlated and never presented as Verified (spec §14).
+            precision: PrecisionLevel::Correlated,
+            raw_json: Some(window.clone()),
+        });
+    }
+}
+
+/// `primary` / `secondary` say nothing to a user, so the reported window length
+/// is folded into the label when Codex provides it.
+fn window_type(name: &str, window_minutes: Option<i64>) -> String {
+    let Some(minutes) = window_minutes else {
+        return name.to_owned();
+    };
+    if minutes % 1440 == 0 {
+        format!("{name}_{}d", minutes / 1440)
+    } else if minutes % 60 == 0 {
+        format!("{name}_{}h", minutes / 60)
+    } else {
+        format!("{name}_{minutes}m")
+    }
 }
 
 fn find_usage(value: &Value) -> Option<UsageCandidate> {
@@ -1030,6 +1235,7 @@ fn codex_home_from_env(
 mod tests {
     use std::{collections::HashMap, fs, path::Path};
 
+    use chrono::{DateTime, Utc};
     use tempfile::TempDir;
     use tokenbuddy_domain::PrecisionLevel;
 
@@ -1044,6 +1250,140 @@ mod tests {
             .join(fixture);
         fs::copy(fixture_path, sessions.join(fixture)).expect("copy fixture");
         home
+    }
+
+    /// Copy a sanitized `auth.json` next to the sessions so the adapter can
+    /// resolve the official account for that home.
+    fn with_auth_fixture(home: &TempDir, fixture: &str) {
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/codex/auth")
+            .join(fixture);
+        fs::copy(fixture_path, home.path().join("auth.json")).expect("copy auth fixture");
+    }
+
+    #[test]
+    fn official_account_and_quota_windows_are_imported_from_the_rollout_log() {
+        let home = fixture_home("rate_limits.jsonl");
+        with_auth_fixture(&home, "chatgpt_auth.json");
+        let adapter = CodexSessionAdapter::new(home.path()).with_fingerprint_salt("fixture-salt");
+
+        let batch = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("import");
+
+        let account = batch.accounts.first().expect("official account");
+        assert_eq!(account.auth_mode, "chatgpt");
+        assert_eq!(account.plan.as_deref(), Some("pro"));
+        assert_eq!(
+            batch.providers.first().map(|provider| provider.id.as_str()),
+            Some("openai")
+        );
+
+        // Two windows on the first row, and only the *changed* primary window on
+        // the third: repeated identical percentages are not a new data point.
+        let windows: Vec<_> = batch
+            .quota_snapshots
+            .iter()
+            .map(|snapshot| {
+                (
+                    snapshot.window_type.as_str(),
+                    snapshot.used_percent,
+                    snapshot.remaining_percent,
+                )
+            })
+            .collect();
+        assert_eq!(
+            windows,
+            vec![
+                ("primary_5h", Some(12.5), Some(87.5)),
+                ("secondary_7d", Some(3.25), Some(96.75)),
+                ("primary_5h", Some(18.75), Some(81.25)),
+            ]
+        );
+        let first = &batch.quota_snapshots[0];
+        assert_eq!(first.account_id, account.id);
+        assert_eq!(first.precision, PrecisionLevel::Correlated);
+        assert_eq!(
+            first.reset_at,
+            Some(
+                DateTime::parse_from_rfc3339("2026-07-26T11:00:01Z")
+                    .expect("reset")
+                    .with_timezone(&Utc)
+            )
+        );
+        assert_eq!(first.credits_remaining, None);
+
+        // Usage rows of the same log carry the correlated account.
+        let event = batch.usage_events.first().expect("usage event");
+        assert_eq!(event.account_id.as_deref(), Some(account.id.as_str()));
+        assert_eq!(event.precision_account, PrecisionLevel::Correlated);
+
+        // A re-import from the stored cursors adds nothing.
+        let cursors = batch
+            .cursors
+            .iter()
+            .cloned()
+            .map(|cursor| (cursor.resource_id.clone(), cursor))
+            .collect::<HashMap<_, _>>();
+        let second = adapter.import_history_sync(&cursors).expect("re-import");
+        assert!(second.usage_events.is_empty());
+        assert!(second.quota_snapshots.is_empty());
+    }
+
+    #[test]
+    fn quota_and_account_stay_unavailable_without_a_readable_auth_file() {
+        let home = fixture_home("rate_limits.jsonl");
+        let adapter = CodexSessionAdapter::new(home.path()).with_fingerprint_salt("fixture-salt");
+
+        let batch = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("import");
+
+        assert!(batch.accounts.is_empty());
+        assert!(batch.quota_snapshots.is_empty());
+        assert!(!batch.usage_events.is_empty());
+        let event = &batch.usage_events[0];
+        assert_eq!(event.account_id, None);
+        assert_eq!(event.precision_account, PrecisionLevel::Unavailable);
+    }
+
+    #[test]
+    fn account_rotation_reports_the_account_but_attributes_neither_usage_nor_quota() {
+        let home = fixture_home("rate_limits.jsonl");
+        with_auth_fixture(&home, "chatgpt_auth.json");
+        let adapter = CodexSessionAdapter::new(home.path())
+            .with_fingerprint_salt("fixture-salt")
+            .with_account_rotation(true);
+
+        let batch = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("import");
+
+        // The signed-in account exists and is reported as an identity...
+        assert_eq!(batch.accounts.len(), 1);
+        assert_eq!(batch.accounts[0].plan.as_deref(), Some("pro"));
+        // ...but nothing is pinned to it: under rotation this log line could
+        // have been served by any of the launcher's accounts.
+        assert!(batch.quota_snapshots.is_empty());
+        assert!(!batch.usage_events.is_empty());
+        for event in &batch.usage_events {
+            assert_eq!(event.account_id, None);
+            assert_eq!(event.precision_account, PrecisionLevel::Unavailable);
+        }
+    }
+
+    #[test]
+    fn an_account_is_only_reported_when_a_fingerprint_salt_is_configured() {
+        let home = fixture_home("rate_limits.jsonl");
+        with_auth_fixture(&home, "api_key_auth.json");
+
+        let unsalted = CodexSessionAdapter::new(home.path());
+        assert!(unsalted.official_account().is_none());
+
+        let salted = CodexSessionAdapter::new(home.path()).with_fingerprint_salt("fixture-salt");
+        let account = salted.official_account().expect("api key account");
+        assert_eq!(account.auth_mode, "api_key");
+        assert_eq!(account.plan, None);
     }
 
     #[test]

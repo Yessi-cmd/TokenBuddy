@@ -1,0 +1,113 @@
+name: Release
+
+# Bundling has to happen on the target OS: the Windows installer needs WebView2,
+# the MSVC toolchain, and the WiX/NSIS bundlers, none of which exist on macOS.
+# Tagging `v*` produces downloadable installers; `workflow_dispatch` produces the
+# same artifacts without publishing a release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    name: Bundle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-release-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build installers
+        run: pnpm build
+
+      # The bundle layout differs per OS (msi/nsis vs dmg/macos), so the whole
+      # bundle directory is uploaded and the release job picks the installers.
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenbuddy-${{ matrix.os }}
+          path: |
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish release
+    needs: bundle
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: bundles
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          find bundles -type f \( -name '*.msi' -o -name '*.exe' -o -name '*.dmg' \) -print
+          # Marked as a pre-release on purpose: the installers are unsigned and
+          # the Windows tray, autostart, and path pickers have not been verified
+          # on real hardware yet.
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "TokenBuddy ${GITHUB_REF_NAME}" \
+            --prerelease \
+            --notes "$(cat <<'NOTES'
+          本地优先的 AI 编程 Token 观测工具。安装包由 GitHub Actions 在对应系统上构建。
+
+          ## 安装
+
+          - Windows：下载 `.msi` 或 `-setup.exe`。安装包**未签名**，SmartScreen 会提示"Windows 已保护你的电脑"，需点击"更多信息"→"仍要运行"。
+          - macOS：下载 `.dmg`。同样未签名，首次打开需在"系统设置 → 隐私与安全性"中放行。
+
+          ## 已知限制
+
+          - Windows 上的托盘交互、开机自启和路径选择器**尚未在真机验证**，CI 只保证能编译通过。
+          - Codex 官方账号识别只反映 `auth.json` 中当前登录的账号；检测到 Cockpit 多账号环境时会主动放弃账号与额度归因，避免把多个账号的用量算到同一个账号头上。
+          - OTel、成本价格表、本地代理尚未实现，相关字段保持 `Unavailable`。
+          NOTES
+          )" \
+            $(find bundles -type f \( -name '*.msi' -o -name '*.exe' -o -name '*.dmg' \))

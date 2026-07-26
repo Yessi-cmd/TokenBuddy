@@ -1,0 +1,10 @@
+{
+  "OPENAI_API_KEY": null,
+  "tokens": {
+    "id_token": "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ICJmaXh0dXJlQGV4YW1wbGUuY29tIiwgImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6IHsiY2hhdGdwdF9hY2NvdW50X2lkIjogImFjY3QtZml4dHVyZS0wMDAxIiwgImNoYXRncHRfcGxhbl90eXBlIjogInBybyJ9fQ.sanitized-signature",
+    "access_token": "sanitized-access-token",
+    "refresh_token": "sanitized-refresh-token",
+    "account_id": "acct-fixture-0001"
+  },
+  "last_refresh": "2026-07-26T09:00:00Z"
+}

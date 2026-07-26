@@ -553,6 +553,20 @@ h3 {
   font-weight: 700;
 }
 
+/* The browse button only renders in the desktop shell, so the row has to look
+   right both with and without it. */
+.settings-field-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-field-input .quiet-button {
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  white-space: nowrap;
+}
+
 .settings-field input {
   width: 100%;
   padding: 10px 11px;

@@ -23,6 +23,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "0004_session_provider_attributions",
         include_str!("../migrations/0004_session_provider_attributions.sql"),
     ),
+    (
+        5,
+        "0005_local_fingerprint_salt",
+        include_str!("../migrations/0005_local_fingerprint_salt.sql"),
+    ),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {

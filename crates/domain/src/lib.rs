@@ -369,6 +369,32 @@ pub struct ProviderSummary {
     pub totals: UsageTotals,
 }
 
+/// An account identity reported by a source that can actually see one — the
+/// Codex `auth.json` names the signed-in ChatGPT account — as opposed to the
+/// synthetic per-provider placeholder the storage layer derives from a session
+/// log when nothing better is known.
+///
+/// The identifying secret never reaches this struct: adapters hash it into
+/// `account_fingerprint` (spec §20.2) and drop the original. `id` is derived
+/// from that fingerprint so the same account keeps the same row across imports
+/// without storing the raw account id, API key, or any OAuth token.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccountRecord {
+    pub id: String,
+    pub provider_id: String,
+    pub display_name: Option<String>,
+    pub account_fingerprint: String,
+    pub auth_mode: String,
+    pub plan: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccountSummary {
+    pub account: AccountRecord,
+    pub provider_name: Option<String>,
+    pub latest_quota: Option<QuotaSummary>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct QuotaSnapshot {
     pub id: String,
@@ -515,9 +541,13 @@ pub trait UsageAdapter: Send + Sync {
 pub struct ImportBatch {
     pub source: Option<SourceRecord>,
     pub providers: Vec<ProviderRecord>,
+    pub accounts: Vec<AccountRecord>,
     pub attributions: Vec<SessionProviderAttribution>,
     pub sessions: Vec<SessionRecord>,
     pub usage_events: Vec<UsageEvent>,
+    /// Official quota windows reported by the source. Kept separate from token
+    /// usage on purpose (spec §8.4): a percentage never becomes a token count.
+    pub quota_snapshots: Vec<QuotaSnapshot>,
     pub cursors: Vec<ImportCursor>,
     pub skipped_records: usize,
 }

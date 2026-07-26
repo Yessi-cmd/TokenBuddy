@@ -6,11 +6,11 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use thiserror::Error;
 use tokenbuddy_domain::{
-    AppKind, AppSettings, CollectionStatus, DashboardSummary, ExportResult, ImportBatch,
-    ImportCursor, LauncherKind, ModelUsage, NormalizedUsage, PrecisionLevel, ProviderRecord,
-    ProviderSummary, QuickSummary, QuotaSnapshot, QuotaSummary, SessionDetail, SessionPage,
-    SessionProviderAttribution, SessionRecord, SessionSummary, SourceRecord, UsageEvent,
-    UsageEventPage, UsageFilters, UsageTotals,
+    AccountRecord, AccountSummary, AppKind, AppSettings, CollectionStatus, DashboardSummary,
+    ExportResult, ImportBatch, ImportCursor, LauncherKind, ModelUsage, NormalizedUsage,
+    PrecisionLevel, ProviderRecord, ProviderSummary, QuickSummary, QuotaSnapshot, QuotaSummary,
+    SessionDetail, SessionPage, SessionProviderAttribution, SessionRecord, SessionSummary,
+    SourceRecord, UsageEvent, UsageEventPage, UsageFilters, UsageTotals,
 };
 
 pub type Result<T> = std::result::Result<T, StorageError>;
@@ -33,6 +33,8 @@ pub enum StorageError {
     MigrationVersion(i64),
     #[error("unsupported export format: {0}")]
     UnsupportedExportFormat(String),
+    #[error("failed to persist the local fingerprint salt")]
+    MissingLocalSalt,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -41,6 +43,8 @@ pub struct ImportStats {
     pub duplicate_events: u64,
     pub upserted_sessions: u64,
     pub updated_cursors: u64,
+    pub upserted_accounts: u64,
+    pub inserted_quota_snapshots: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -115,6 +119,7 @@ impl Database {
         let mut stats = ImportStats {
             upserted_sessions: batch.sessions.len() as u64,
             updated_cursors: batch.cursors.len() as u64,
+            upserted_accounts: batch.accounts.len() as u64,
             ..ImportStats::default()
         };
 
@@ -124,6 +129,12 @@ impl Database {
 
         for provider in &batch.providers {
             upsert_provider_record(&transaction, provider)?;
+        }
+
+        // Accounts land before events and quota rows so both can reference a
+        // real identity instead of the placeholder derived from a model name.
+        for account in &batch.accounts {
+            upsert_account_record(&transaction, account)?;
         }
 
         // Apply provider attributions before inserting events so rows landing in
@@ -163,6 +174,12 @@ impl Database {
                 stats.inserted_events += 1;
             } else {
                 stats.duplicate_events += 1;
+            }
+        }
+
+        for snapshot in &batch.quota_snapshots {
+            if insert_quota_snapshot(&transaction, snapshot)? {
+                stats.inserted_quota_snapshots += 1;
             }
         }
 
@@ -267,6 +284,44 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Accounts with their provider name and newest quota window. Placeholder
+    /// accounts derived from a session log are included so the UI can show what
+    /// is known and what is still `Unavailable`.
+    pub fn list_accounts(&self) -> Result<Vec<AccountSummary>> {
+        let mut statement = self.connection.prepare(
+            "SELECT a.id, a.provider_id, a.display_name, a.account_fingerprint,
+                    a.auth_mode, a.plan, p.display_name
+             FROM accounts a
+             LEFT JOIN providers p ON p.id = a.provider_id
+             ORDER BY a.auth_mode = 'session_log', a.updated_at DESC, a.id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    AccountRecord {
+                        id: row.get(0)?,
+                        provider_id: row.get(1)?,
+                        display_name: row.get(2)?,
+                        account_fingerprint: row.get(3)?,
+                        auth_mode: row.get(4)?,
+                        plan: row.get(5)?,
+                    },
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(account, provider_name)| {
+                let latest_quota = self.latest_quota_summary(&account.id)?;
+                Ok(AccountSummary {
+                    account,
+                    provider_name,
+                    latest_quota,
+                })
+            })
+            .collect()
+    }
+
     pub fn list_quota_snapshots(
         &self,
         account_id: Option<&str>,
@@ -289,6 +344,41 @@ impl Database {
         )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// The per-install salt for account and credential fingerprints (spec
+    /// §20.2), generated once from SQLite's CSPRNG. It is intentionally not part
+    /// of `AppSettings`, so it never reaches the UI, the loopback API, or an
+    /// export — a fingerprint without the salt cannot be reversed by lookup.
+    pub fn local_salt(&self) -> Result<String> {
+        if let Some(salt) = self.stored_local_salt()? {
+            return Ok(salt);
+        }
+        let generated: String =
+            self.connection
+                .query_row("SELECT lower(hex(randomblob(16)))", [], |row| row.get(0))?;
+        self.connection.execute(
+            "INSERT INTO app_settings (id, local_salt) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET
+                 local_salt = COALESCE(app_settings.local_salt, excluded.local_salt)",
+            params![generated],
+        )?;
+        // Re-read instead of returning `generated`: an earlier writer may have
+        // won the COALESCE, and the stored salt is the one fingerprints used.
+        self.stored_local_salt()?
+            .ok_or(StorageError::MissingLocalSalt)
+    }
+
+    fn stored_local_salt(&self) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT local_salt FROM app_settings WHERE id = 1",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     pub fn get_app_settings(&self) -> Result<AppSettings> {
@@ -1236,6 +1326,66 @@ fn upsert_provider_record(conn: &Connection, provider: &ProviderRecord) -> Resul
     Ok(())
 }
 
+/// Persist an account a source actually identified. `display_name`, `plan` and
+/// `auth_mode` are refreshed on every import (a plan can change), but a stored
+/// value is never replaced by a missing one.
+fn upsert_account_record(conn: &Connection, account: &AccountRecord) -> Result<()> {
+    let timestamp = now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO accounts (
+             id, provider_id, display_name, account_fingerprint, auth_mode,
+             plan, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+         ON CONFLICT(id) DO UPDATE SET
+             provider_id = excluded.provider_id,
+             display_name = COALESCE(excluded.display_name, accounts.display_name),
+             account_fingerprint = excluded.account_fingerprint,
+             auth_mode = excluded.auth_mode,
+             plan = COALESCE(excluded.plan, accounts.plan),
+             updated_at = excluded.updated_at",
+        params![
+            account.id,
+            account.provider_id,
+            account.display_name,
+            account.account_fingerprint,
+            account.auth_mode,
+            account.plan,
+            timestamp,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Quota snapshots carry an id derived from their content, so re-importing the
+/// same log line is a no-op rather than a second point in the time series.
+fn insert_quota_snapshot(conn: &Connection, snapshot: &QuotaSnapshot) -> Result<bool> {
+    let raw_json = snapshot
+        .raw_json
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let changed = conn.execute(
+        "INSERT INTO quota_snapshots (
+             id, account_id, captured_at, window_type, used_percent,
+             remaining_percent, reset_at, credits_remaining, precision, raw_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(id) DO NOTHING",
+        params![
+            snapshot.id,
+            snapshot.account_id,
+            snapshot.captured_at.to_rfc3339(),
+            snapshot.window_type,
+            snapshot.used_percent,
+            snapshot.remaining_percent,
+            snapshot.reset_at.map(|value| value.to_rfc3339()),
+            snapshot.credits_remaining,
+            snapshot.precision.as_str(),
+            raw_json,
+        ],
+    )?;
+    Ok(changed == 1)
+}
+
 fn upsert_session(conn: &Connection, session: &SessionRecord) -> Result<()> {
     conn.execute(
         "INSERT INTO sessions (
@@ -1903,11 +2053,11 @@ fn to_sql_error(error: StorageError) -> rusqlite::Error {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{Duration, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use tokenbuddy_domain::{
-        AppKind, AppSettings, CollectionStatus, ImportBatch, ImportCursor, IngestSource,
-        LauncherKind, NormalizedUsage, PrecisionLevel, SessionProviderAttribution, SessionRecord,
-        SourceRecord, UsageEvent, UsageFilters,
+        AccountRecord, AppKind, AppSettings, CollectionStatus, ImportBatch, ImportCursor,
+        IngestSource, LauncherKind, NormalizedUsage, PrecisionLevel, QuotaSnapshot,
+        SessionProviderAttribution, SessionRecord, SourceRecord, UsageEvent, UsageFilters,
     };
 
     use super::{Database, RetentionOutcome};
@@ -1983,6 +2133,130 @@ mod tests {
             raw_event_hash: hash.to_owned(),
             raw_usage_json: Some(serde_json::json!({"input_tokens": input})),
         }
+    }
+
+    fn official_account() -> AccountRecord {
+        AccountRecord {
+            id: "openai:chatgpt:fixture00000000".to_owned(),
+            provider_id: "openai".to_owned(),
+            display_name: Some("fixture@example.com".to_owned()),
+            account_fingerprint: "fixture00000000feedfacefeedface".to_owned(),
+            auth_mode: "chatgpt".to_owned(),
+            plan: Some("pro".to_owned()),
+        }
+    }
+
+    fn quota(id: &str, used_percent: f64, captured_at: DateTime<Utc>) -> QuotaSnapshot {
+        QuotaSnapshot {
+            id: id.to_owned(),
+            account_id: official_account().id,
+            account_name: None,
+            provider_name: None,
+            captured_at,
+            window_type: "primary_5h".to_owned(),
+            used_percent: Some(used_percent),
+            remaining_percent: Some(100.0 - used_percent),
+            reset_at: Some(captured_at + Duration::hours(1)),
+            credits_remaining: None,
+            precision: PrecisionLevel::Correlated,
+            raw_json: Some(serde_json::json!({"used_percent": used_percent})),
+        }
+    }
+
+    #[test]
+    fn official_accounts_and_quota_windows_survive_a_repeated_import() {
+        let mut database = Database::open_in_memory().expect("database opens");
+        let captured_at = Utc::now();
+        let mut event = event("quota-event", Some(40));
+        event.account_id = Some(official_account().id);
+        event.precision_account = PrecisionLevel::Correlated;
+        let batch = ImportBatch {
+            source: Some(source()),
+            accounts: vec![official_account()],
+            sessions: vec![session()],
+            usage_events: vec![event],
+            quota_snapshots: vec![quota("quota-1", 12.5, captured_at)],
+            ..ImportBatch::default()
+        };
+
+        let first = database.apply_import_batch(&batch).expect("first import");
+        assert_eq!(first.upserted_accounts, 1);
+        assert_eq!(first.inserted_quota_snapshots, 1);
+
+        let second = database.apply_import_batch(&batch).expect("second import");
+        assert_eq!(second.inserted_events, 0);
+        assert_eq!(
+            second.inserted_quota_snapshots, 0,
+            "re-importing the same window must not add a second data point"
+        );
+        assert_eq!(
+            database
+                .list_quota_snapshots(None, 10)
+                .expect("quota snapshots")
+                .len(),
+            1
+        );
+
+        // The account resolves with its provider and newest window, and the
+        // percentages are never turned into a token count.
+        let accounts = database.list_accounts().expect("accounts");
+        let summary = accounts
+            .iter()
+            .find(|summary| summary.account.auth_mode == "chatgpt")
+            .expect("official account");
+        assert_eq!(summary.account.plan.as_deref(), Some("pro"));
+        assert_eq!(
+            summary
+                .latest_quota
+                .as_ref()
+                .and_then(|quota| quota.used_percent),
+            Some(12.5)
+        );
+
+        // A newer window for the same account is a new row, and the summary
+        // follows it.
+        let newer = ImportBatch {
+            quota_snapshots: vec![quota("quota-2", 18.75, captured_at + Duration::minutes(5))],
+            ..ImportBatch::default()
+        };
+        assert_eq!(
+            database
+                .apply_import_batch(&newer)
+                .expect("newer quota")
+                .inserted_quota_snapshots,
+            1
+        );
+        let summary = database
+            .quick_summary(Utc::now(), CollectionStatus::Collecting, None)
+            .expect("quick summary");
+        let quota_summary = summary.quota_summary.expect("tray quota summary");
+        assert_eq!(quota_summary.used_percent, Some(18.75));
+        assert_eq!(quota_summary.window_type, "primary_5h");
+        assert_eq!(quota_summary.precision, PrecisionLevel::Correlated);
+    }
+
+    #[test]
+    fn the_fingerprint_salt_is_generated_once_and_stays_out_of_app_settings() {
+        let database = Database::open_in_memory().expect("database opens");
+        let salt = database.local_salt().expect("salt");
+        assert_eq!(salt.len(), 32);
+        assert_eq!(salt, database.local_salt().expect("stable salt"));
+
+        // Saving settings must not disturb it, and the salt must not travel to
+        // the UI through AppSettings.
+        database
+            .save_app_settings(&AppSettings {
+                codex_home: Some("/fixtures/codex".to_owned()),
+                ..AppSettings::default()
+            })
+            .expect("save settings");
+        assert_eq!(salt, database.local_salt().expect("salt survives save"));
+        let settings = database.get_app_settings().expect("settings");
+        assert!(
+            !serde_json::to_string(&settings)
+                .expect("json")
+                .contains(&salt)
+        );
     }
 
     #[test]
