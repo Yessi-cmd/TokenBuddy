@@ -3374,6 +3374,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokenbuddy-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokenbuddy-codex-session",
+ "tokenbuddy-domain",
+ "tokenbuddy-storage",
+]
+
+[[package]]
 name = "tokenbuddy-desktop"
 version = "0.1.0"
 dependencies = [
@@ -3382,7 +3395,9 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
  "tokenbuddy-codex-session",
+ "tokenbuddy-core",
  "tokenbuddy-domain",
  "tokenbuddy-storage",
 ]

@@ -3,10 +3,13 @@ import { useEffect, useMemo, useState } from "react";
 import {
   detectCodexPath,
   getDashboardSummary,
+  getQuickSummary,
   getSessionDetail,
   listSessions,
   listSources,
+  openLocalWebApi,
   rescanCodex,
+  type QuickSummary,
   type DashboardSummary,
   type DetectionResult,
   type PrecisionLevel,
@@ -32,6 +35,14 @@ const emptyTotals: UsageTotals = {
 };
 
 function App() {
+  return window.location.pathname === "/quick" ? (
+    <QuickSummaryView />
+  ) : (
+    <DashboardView />
+  );
+}
+
+function DashboardView() {
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [sources, setSources] = useState<SourceRecord[]>([]);
@@ -74,6 +85,13 @@ function App() {
       active = false;
     };
   }, [refreshVersion]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setRefreshVersion((value) => value + 1);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -139,6 +157,18 @@ function App() {
     }
   }
 
+  async function handleOpenWeb() {
+    try {
+      const result = await openLocalWebApi();
+      setStatus(
+        result.url ? `本地网页面板已启动：${result.url}` : "本地网页面板已启动",
+      );
+      setError(null);
+    } catch {
+      setError("无法启动本地网页面板；请先通过 Tauri 桌面应用运行。");
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -162,6 +192,13 @@ function App() {
             disabled={isScanning}
           >
             {isScanning ? "扫描中…" : "扫描 Codex"}
+          </button>
+          <button
+            className="quiet-button"
+            type="button"
+            onClick={handleOpenWeb}
+          >
+            本地网页
           </button>
         </div>
       </header>
@@ -279,6 +316,104 @@ function App() {
         <span>代理模式未启用 · 数据留在本机</span>
       </footer>
     </main>
+  );
+}
+
+function QuickSummaryView() {
+  const [summary, setSummary] = useState<QuickSummary | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadSummary() {
+      try {
+        const nextSummary = await getQuickSummary();
+        if (!active) return;
+        setSummary(nextSummary);
+        setError(null);
+      } catch {
+        if (active) setError("无法读取后台 Core 摘要。");
+      }
+    }
+
+    void loadSummary();
+    const timer = window.setInterval(() => {
+      void loadSummary();
+    }, 2000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  return (
+    <main className="quick-shell">
+      <div className="quick-heading">
+        <div>
+          <p className="eyebrow">后台 Core</p>
+          <h1>TokenBuddy</h1>
+        </div>
+        <span
+          className={`quick-status status-${summary?.collection_status ?? "starting"}`}
+        >
+          {collectionStatusLabel(summary?.collection_status)}
+        </span>
+      </div>
+      {error ? <p className="notice notice-warning">{error}</p> : null}
+      <section className="quick-primary" aria-label="今日 Token">
+        <span>今日 Token</span>
+        <strong>{formatTokens(summary?.today_total_tokens)}</strong>
+      </section>
+      <section className="quick-session" aria-label="当前会话摘要">
+        <div className="quick-session-title">
+          <span>当前会话</span>
+          <strong>{summary?.active_session_title || "Unavailable"}</strong>
+        </div>
+        <div className="quick-model">
+          {summary?.active_app || "Unavailable"} ·{" "}
+          {summary?.model || "Unavailable"}
+        </div>
+        <div className="quick-metrics">
+          <QuickMetric
+            label="输入"
+            value={formatTokens(summary?.session_input_tokens)}
+          />
+          <QuickMetric
+            label="缓存读取"
+            value={formatTokens(summary?.session_cache_read_tokens)}
+          />
+          <QuickMetric
+            label="输出"
+            value={formatTokens(summary?.session_output_tokens)}
+          />
+          <QuickMetric
+            label="缓存命中率"
+            value={formatPercent(summary?.session_cache_hit_rate ?? null)}
+          />
+        </div>
+      </section>
+      {summary?.quota_summary ? (
+        <p className="quick-note">
+          官方额度：{formatPercent(summary.quota_summary.used_percent)} 已用 ·{" "}
+          {summary.quota_summary.precision}
+        </p>
+      ) : (
+        <p className="quick-note">官方额度 Unavailable</p>
+      )}
+      {summary?.latest_warning ? (
+        <p className="notice notice-warning">{summary.latest_warning}</p>
+      ) : null}
+    </main>
+  );
+}
+
+function QuickMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="quick-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -478,6 +613,18 @@ function precisionLabel(level: PrecisionLevel): string {
     unavailable: "Unavailable",
   };
   return labels[level];
+}
+
+function collectionStatusLabel(
+  status: QuickSummary["collection_status"] | undefined,
+): string {
+  const labels: Record<QuickSummary["collection_status"], string> = {
+    starting: "启动中",
+    collecting: "采集中",
+    idle: "待机",
+    error: "需注意",
+  };
+  return status ? labels[status] : labels.starting;
 }
 
 export default App;

@@ -147,6 +147,40 @@ TokenBuddy
 └──────────────────────────────────────────────────────┘
 ```
 
+## 4.1 Tray-first 展示架构（MVP 硬性要求）
+
+TokenBuddy 默认采用 Tray-first（托盘优先）运行方式。应用启动后只启动一个后台采集 Core 并注册系统入口，不自动弹出完整桌面面板；完整桌面面板和本地网页面板均按需打开。
+
+```text
+macOS 菜单栏轻量弹窗 ──┐
+Windows 系统托盘轻量弹窗 ─┤
+完整桌面面板 ───────────┤──> 单实例 Rust Core ──> SQLite
+本地网页面板 ───────────┘
+```
+
+四个入口必须共享：
+
+- 同一个后台采集 Core。
+- 同一个 SQLite 数据库。
+- 同一套 Token、额度、精度和缺失值统计语义。
+- 同一套只读查询服务和 `QuickSummary` 快速摘要。
+
+禁止每个面板自行扫描 Codex 或 Claude Code 日志。这样会造成重复统计、文件锁竞争和不必要的资源消耗。所有文件监听、增量导入、归一化、聚合和数据库写入都由 Core 负责，面板只通过 Tauri IPC 或本地 HTTP API 查询数据。
+
+默认启动流程：
+
+```text
+启动 TokenBuddy
+    ↓
+启动单实例后台采集 Core
+    ↓
+注册 macOS 菜单栏图标 / Windows 系统托盘图标
+    ↓
+开始监听和增量导入 Token 数据
+    ↓
+不弹出完整窗口
+```
+
 ---
 
 # 5. 技术栈
@@ -166,7 +200,10 @@ TokenBuddy
 - 同一代码库支持 macOS 和 Windows。
 - Rust 适合文件监听、SQLite、OTLP Receiver、本地代理。
 - 资源占用低于 Electron。
-- 系统托盘、自动启动和原生路径访问较成熟。
+- 系统托盘、macOS 菜单栏、自动启动和原生路径访问较成熟。
+- 同一个 React SPA 同时服务完整桌面面板和本地网页面板；两者只区分数据访问通道，不复制业务逻辑或统计实现。
+
+本地网页面板通过 Rust Core 提供的 loopback HTTP API 访问数据，不直接打开 SQLite，也不建立第二套采集或聚合管线。
 
 ## 5.2 数据库
 
@@ -1144,6 +1181,110 @@ Provider
 - 是否保存请求元数据
 - 数据保留周期
 
+## 19.6 Tray-first 入口与运行行为
+
+默认运行方式必须是后台常驻、按需展示：
+
+| 功能 | 默认状态 |
+|---|---|
+| 后台采集 Core | 开启 |
+| macOS 菜单栏 / Windows 系统托盘 | 开启 |
+| 轻量弹窗 | 点击时打开 |
+| 完整桌面面板 | 按需打开 |
+| 本地网页服务 | 按需启动 |
+| 开机自启 | 安装引导时询问 |
+| 本地代理 | 关闭 |
+
+启动 TokenBuddy 后，Core 负责单实例初始化、数据源发现、文件监听、增量导入和摘要维护；应用不得自动弹出完整桌面窗口。关闭完整桌面窗口默认只隐藏窗口，不能停止后台采集；真正退出必须通过菜单栏或托盘菜单执行。
+
+### macOS 菜单栏
+
+点击菜单栏图标打开轻量 Popover。Popover 至少可以读取预聚合的：
+
+- 采集状态、最近告警。
+- 当前应用、Provider、模型、项目和会话标题（缺失时显示 `Unavailable`）。
+- 当前会话输入、缓存读取、输出和缓存命中率。
+- 今日 Token 总量。
+- 官方额度摘要（若数据源未提供则保持不可用，不从百分比反推 Token）。
+
+菜单栏支持两种显示形式：仅图标、图标加文字。文字代表可以由用户选择：
+
+- 今日 Token。
+- 当前会话 Token。
+- 缓存命中率。
+- 官方额度已用百分比。
+- 不显示文字。
+
+### Windows 系统托盘
+
+行为约定：
+
+- 单击：打开轻量弹窗。
+- 双击：打开完整桌面面板。
+- 右键：打开功能菜单。
+- 鼠标悬停：显示今日 Token、采集状态和当前 Provider。
+- 关闭完整桌面窗口：隐藏窗口，后台 Core 继续采集。
+- 真正退出：通过右键托盘菜单执行“退出 TokenBuddy”。
+
+### 轻量弹窗边界
+
+轻量弹窗不是完整面板的缩小版，不得：
+
+- 加载全部历史会话。
+- 绘制大型趋势图。
+- 扫描原始 JSONL。
+- 运行复杂数据库聚合。
+- 一次展示几十个指标。
+
+Core 必须提前维护 `QuickSummary`，轻量弹窗只读取这一份摘要。摘要中的计数、费用、额度和归因都必须遵守全局缺失值与精度规则；未知值保持 `None` / `Unavailable`，不能为了展示方便写成零。
+
+建议的跨端领域契约如下（具体枚举和额度字段由 `domain` crate 定义）：
+
+```rust
+pub struct QuickSummary {
+    pub collection_status: CollectionStatus,
+    pub active_app: Option<AppKind>,
+    pub active_session_title: Option<String>,
+    pub provider_name: Option<String>,
+    pub model: Option<String>,
+
+    pub session_input_tokens: Option<u64>,
+    pub session_cache_read_tokens: Option<u64>,
+    pub session_output_tokens: Option<u64>,
+    pub session_cache_hit_rate: Option<f64>,
+
+    pub today_total_tokens: Option<u64>,
+    pub quota_summary: Option<QuotaSummary>,
+    pub latest_warning: Option<String>,
+}
+```
+
+`today_total_tokens` 只有在聚合结果已知时才返回 `Some`；已知总量确实为零时才允许返回 `Some(0)`。`QuotaSummary` 必须保留官方窗口和适用精度，不能把额度百分比换算成所谓的准确 Token 数。
+
+### 完整桌面面板与本地网页面板
+
+完整桌面面板和本地网页面板必须共用同一个 React SPA，不得开发两套 UI 或两套统计逻辑。建议路由：
+
+```text
+/quick       托盘轻量弹窗
+/dashboard   总览
+/sessions    会话列表
+/sessions/:id 会话详情
+/providers   Provider 统计
+/quotas      官方额度
+/sources     数据源状态
+/settings    设置
+```
+
+两种入口只区分数据访问方式：
+
+```text
+桌面端：Tauri IPC -> Rust Core -> SQLite
+网页端：loopback HTTP API -> Rust Core -> SQLite
+```
+
+本地网页服务默认只监听 `127.0.0.1` 和 `::1`，禁止监听 `0.0.0.0` 或其他局域网地址。网页服务按需启动，适合浏览器长期查看、大屏分析、开发调试、复制表格和导出数据；它同样不得直接访问 SQLite 或原始日志。
+
 ---
 
 # 20. 隐私与安全
@@ -1193,6 +1334,13 @@ OTel Receiver 和代理：
 - 提供进程级随机访问 Token。
 - 不接受局域网请求。
 
+本地网页 Dashboard 是独立于 OTel Receiver 和本地代理的按需服务：
+
+- 只允许绑定 `127.0.0.1` 和 `::1`。
+- 明确禁止绑定 `0.0.0.0`，避免意外暴露到局域网。
+- 通过 Rust Core 的只读查询服务返回数据，不直接访问 SQLite。
+- 未启动本地网页入口时，不影响桌面端和后台采集 Core。
+
 ---
 
 # 21. 性能要求
@@ -1227,6 +1375,19 @@ CREATE INDEX idx_usage_app ON usage_events(app);
 CREATE INDEX idx_usage_request ON usage_events(request_id);
 CREATE INDEX idx_quota_account_time ON quota_snapshots(account_id, captured_at);
 ```
+
+## 21.4 Tray-first 资源与响应目标
+
+Tray-first 模式必须优先保证后台采集的低干扰和轻量入口的响应速度：
+
+- `QuickSummary` 查询 P95 < 50 ms。
+- 托盘 / 菜单栏轻量弹窗打开 P95 < 200 ms。
+- 空闲 CPU 持续平均目标 < 0.5%。
+- 托盘模式默认不创建完整 Dashboard WebView；轻量弹窗隐藏较长时间后可以销毁，下一次打开再创建。
+- 文件监听采用增量读取；历史日志只做首次导入，之后记录 offset 或等价 cursor。
+- 完整 Dashboard 只查询 SQLite 和 Core 查询服务，不碰原始日志。
+
+以上是工程目标，不是当前已经验证的数据，必须在 macOS 和 Windows 真机测试中分别测量并记录结果。
 
 ---
 
@@ -1324,18 +1485,27 @@ fixtures/
 ## 24.1 MVP 必须完成
 
 1. Tauri 2 桌面壳。
-2. SQLite migrations。
-3. Codex Session 历史导入。
-4. Claude Code Session 历史导入。
-5. 文件增量监听。
-6. 统一 Token 语义。
-7. 精度分级。
-8. 会话列表。
-9. 会话详情。
-10. 总览统计。
-11. CSV / JSON 导出。
-12. macOS 构建。
-13. Windows 构建。
+2. 单实例后台 Rust Core，以及 Core 生命周期和退出控制。
+3. SQLite migrations。
+4. Codex Session 历史导入。
+5. Claude Code Session 历史导入。
+6. 文件增量监听、轮转处理和 cursor 持久化。
+7. 统一 Token 语义、缺失值语义和精度分级。
+8. `QuickSummary` 维护与查询。
+9. macOS 菜单栏入口。
+10. Windows 系统托盘入口。
+11. 轻量 Popover / 托盘弹窗。
+12. 完整桌面 Dashboard。
+13. 本地网页 Dashboard；与桌面端共用同一个 React SPA 和 Rust 查询服务。
+14. 会话列表。
+15. 会话详情。
+16. 总览统计。
+17. 官方额度摘要的可用态 / 不可用态展示，不从百分比反推 Token。
+18. CSV / JSON 导出。
+19. 完整桌面窗口关闭后，后台 Core 继续采集。
+20. macOS 构建。
+21. Windows 构建。
+22. 安装引导中询问是否开机自启，默认不得静默修改用户选择。
 
 ## 24.2 MVP 可延后
 
@@ -1343,8 +1513,7 @@ fixtures/
 - Claude OTel
 - CC Switch Adapter
 - Cockpit Adapter
-- 官方额度
-- 菜单栏 / 系统托盘
+- 各 Provider 的官方额度数据源适配器（MVP 先完成统一字段和 `Unavailable` 展示）
 - 自动更新
 
 ## 24.3 MVP 明确不做
@@ -1413,20 +1582,29 @@ fixtures/
 - 支持至少两种日志 Schema。
 - 无法解析字段显示 Unavailable。
 
-## Phase 4：桌面面板
+## Phase 4：Tray-first 入口与展示层
 
 任务：
 
-- 总览页。
-- 会话列表。
-- 会话详情。
-- 筛选。
-- 导出。
+- 实现单实例后台采集 Core 的启动、停止和退出生命周期。
+- 启动时注册 macOS 菜单栏和 Windows 系统托盘，不自动打开完整窗口。
+- 实现 Core 维护的 `QuickSummary` 及其 Tauri 查询命令。
+- 实现 macOS 菜单栏 Popover、Windows 托盘轻量弹窗及各自的交互约定。
+- 实现共享 React SPA 的 `/quick`、`/dashboard`、`/sessions`、`/sessions/:id`、`/providers`、`/quotas`、`/sources` 和 `/settings` 路由。
+- 完整桌面面板通过 Tauri IPC 访问 Rust Core；本地网页面板通过 loopback HTTP API 访问同一 Rust Core。
+- 本地网页服务只绑定 `127.0.0.1` 和 `::1`，按需启动。
+- 完成总览页、会话列表、会话详情、筛选和导出。
+- 完整窗口关闭后只隐藏窗口，后台 Core 和文件监听继续运行；托盘菜单提供真正退出。
 
 验收：
 
-- 可以从会话追踪到请求级 Token。
-- 精度可见。
+- 应用启动后 Core 和系统入口已运行，但完整窗口没有自动弹出。
+- 菜单栏 / 托盘轻量弹窗只读取 `QuickSummary`，不扫描原始日志、不加载全部历史、不运行复杂聚合。
+- 四个入口的同一查询在 Token、精度、缺失值和额度语义上保持一致。
+- 可以从会话追踪到请求级 Token，精度可见。
+- 关闭完整窗口后仍能持续采集；退出后所有后台资源被释放。
+- 本地网页 API 无法从局域网访问。
+- 在 macOS 和 Windows 真机分别验证入口交互，并记录 `QuickSummary` P95、轻量弹窗 P95 和空闲 CPU。
 
 ## Phase 5：OTel
 
@@ -1730,13 +1908,16 @@ Codex 在开始编码时按以下顺序执行：
 2. 如果仓库为空，初始化 Tauri 2 + React + TypeScript。
 3. 建立 Rust workspace 和 `domain` crate。
 4. 先实现数据库 migration 和核心类型。
-5. 编写 fixture，不要先连接真实用户目录。
-6. 实现 Codex Session Adapter。
-7. 完成单元测试和幂等测试。
-8. 再实现 Claude Session Adapter。
-9. 完成最小 UI。
-10. 最后接入文件监听。
-11. OTel、CC Switch、Cockpit、代理按后续 Phase 实现。
+5. 编写脱敏 fixture，不要先连接真实用户目录。
+6. 先写解析、累计快照、cursor、轮转和幂等测试，再实现 Codex Session Adapter。
+7. 实现 Claude Session Adapter，并为每种 Schema 保留独立 fixture。
+8. 完成文件监听、增量导入、会话聚合和只读查询服务。
+9. 实现单实例后台采集 Core，并让 Core 维护 `QuickSummary`。
+10. 实现 macOS 菜单栏、Windows 系统托盘和轻量弹窗；启动时不自动打开完整窗口。
+11. 实现共享 React SPA 的轻量入口、完整桌面 Dashboard 和路由。
+12. 实现按需启动的 loopback 本地 Web API；只监听 `127.0.0.1` 和 `::1`。
+13. 完成跨入口一致性、窗口隐藏后继续采集、退出释放资源和真机性能测试。
+14. OTel、CC Switch、Cockpit、代理按后续 Phase 实现；本地代理不得成为 Core 或统计功能的前置条件。
 
 每个阶段：
 
@@ -1787,6 +1968,19 @@ T013 增加 macOS/Windows 路径检测
 T014 添加 CI 编译与测试
 ```
 
+## 33.1 Tray-first 补充实施要求
+
+T001 至 T014 是本计划最初定义的第一批任务编号，并不是全部产品需求的标题。根据 Tray-first 调整，完成初始任务后还必须按 Phase 4 实现以下要求：
+
+1. 应用只运行一个后台采集 Core；所有面板共享 Core、SQLite、统计语义和查询服务。
+2. 启动后默认注册 macOS 菜单栏或 Windows 系统托盘，开始监听 Token 数据，但不自动弹出完整窗口。
+3. Core 维护 `QuickSummary`，轻量弹窗只读摘要，不扫描原始 JSONL、不加载历史、不执行复杂聚合。
+4. macOS 菜单栏支持 Popover、图标或图标加文字显示；Windows 托盘支持单击轻量弹窗、双击完整面板、右键菜单和悬停摘要。
+5. 完整桌面面板与本地网页面板共用一个 React SPA 和一套 Rust 查询服务，只区分 Tauri IPC 与 loopback HTTP 访问通道。
+6. 本地网页服务按需启动，只监听 `127.0.0.1` 和 `::1`，禁止监听 `0.0.0.0` 或局域网地址。
+7. 关闭完整窗口只隐藏窗口，后台 Core 继续采集；真正退出只能通过菜单栏或托盘菜单执行。
+8. 验证重复入口不会重复扫描、重复导入或改变会话聚合；分别在 macOS 和 Windows 真机验证入口行为和资源目标。
+
 完成 T001 至 T014 后，再评估 OTel 和其他 Adapter。
 
 ---
@@ -1798,7 +1992,9 @@ T014 添加 CI 编译与测试
 [x] Phase 1：数据核心
 [x] Phase 2：Codex Session
 [ ] Phase 3：Claude Session
-[x] Phase 4：桌面面板
+[x] Phase 4a：初始桌面面板（T011-T013）
+[x] Phase 4b：Tray-first 最小闭环（后台 Core、QuickSummary、托盘、轻量弹窗与 loopback API）
+[ ] Phase 4b 展示层补全：完整共享 SPA 路由、性能真机验证与原生文件通知
 [ ] Phase 5：OTel
 [ ] Phase 6：CC Switch / Cockpit
 [ ] Phase 7：可选本地代理
@@ -1812,4 +2008,8 @@ Phase 1 已完成：共享 domain 类型、SQLite 初始迁移、sources/session
 
 Phase 2 已完成：Codex 脱敏 JSONL fixture、普通 usage 与累计快照解析、重复快照去重、回退重置、子 Agent 继承历史跳过、坏行降级、文件 cursor 增量导入、文件轮转签名检测、会话聚合和 macOS/Windows 默认路径检测已实现。
 
-Phase 4 已完成：Tauri commands 已提供 dashboard、session list/detail、usage event 和 source 查询；最小 Dashboard、会话列表/详情时间线、精度徽标、Codex 路径检测和显式扫描入口已完成。T014 CI 已加入 macOS/Windows 的前端、Rust 测试、lint、检查和 Tauri 无 bundle 编译步骤。
+Phase 4a 已完成：Tauri commands 已提供 dashboard、session list/detail、usage event 和 source 查询；最小 Dashboard、会话列表/详情时间线、精度徽标、Codex 路径检测和显式扫描入口已完成。T014 CI 已加入 macOS/Windows 的前端、Rust 测试、lint、检查和 Tauri 无 bundle 编译步骤。
+
+Phase 4b 最小闭环已完成：新增独立 `tokenbuddy-core`，由单个后台线程持有 SQLite 查询 / 写入边界，启动时导入现有 Codex Session 并持续执行基于 cursor 的增量轮询；Core 维护 `QuickSummary`，Tauri commands、macOS 菜单栏 / Windows 托盘、隐藏启动的完整窗口、轻量 `/quick` 窗口和按需 loopback HTTP API 共用同一 Core。关闭完整窗口只隐藏窗口，退出菜单才停止 Core；本地网页服务只绑定 `127.0.0.1`。
+
+Phase 4b 展示层仍有明确后续项：当前轻量闭环使用跨平台定时增量轮询，尚未替换为 `notify` 原生文件事件；完整共享 SPA 的 `/providers`、`/quotas`、`/settings` 等展示路由和 macOS / Windows 真机交互、`QuickSummary` P95、轻量弹窗 P95、空闲 CPU 测量仍待完成。Claude Session、OTel、CC Switch、Cockpit、官方额度数据源和本地代理仍按后续 Phase 实现，本地代理继续不是 Core 或统计功能的前置条件。

@@ -119,6 +119,77 @@ impl fmt::Display for PrecisionLevel {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionStatus {
+    Starting,
+    Collecting,
+    Idle,
+    Error,
+}
+
+impl CollectionStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Collecting => "collecting",
+            Self::Idle => "idle",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for CollectionStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str((*self).as_str())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuotaSummary {
+    pub window_type: String,
+    pub used_percent: Option<f64>,
+    pub remaining_percent: Option<f64>,
+    pub reset_at: Option<DateTime<Utc>>,
+    pub credits_remaining: Option<f64>,
+    pub precision: PrecisionLevel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuickSummary {
+    pub collection_status: CollectionStatus,
+    pub active_app: Option<AppKind>,
+    pub active_session_title: Option<String>,
+    pub provider_name: Option<String>,
+    pub model: Option<String>,
+    pub session_input_tokens: Option<u64>,
+    pub session_cache_read_tokens: Option<u64>,
+    pub session_output_tokens: Option<u64>,
+    pub session_cache_hit_rate: Option<f64>,
+    pub today_total_tokens: Option<u64>,
+    pub quota_summary: Option<QuotaSummary>,
+    pub latest_warning: Option<String>,
+}
+
+impl QuickSummary {
+    pub fn starting() -> Self {
+        Self {
+            collection_status: CollectionStatus::Starting,
+            active_app: None,
+            active_session_title: None,
+            provider_name: None,
+            model: None,
+            session_input_tokens: None,
+            session_cache_read_tokens: None,
+            session_output_tokens: None,
+            session_cache_hit_rate: None,
+            today_total_tokens: None,
+            quota_summary: None,
+            latest_warning: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NormalizedUsage {
     pub input_tokens_total: Option<u64>,
@@ -370,6 +441,13 @@ impl UsageTotals {
             provider_reported_cost: None,
             estimated_cost: None,
             cache_hit_rate_percent: usage.cache_hit_rate_percent(),
+        }
+    }
+
+    pub fn total_tokens(&self) -> Option<u64> {
+        match (self.input_tokens_total, self.output_tokens_total) {
+            (Some(input), Some(output)) => input.checked_add(output),
+            _ => None,
         }
     }
 }

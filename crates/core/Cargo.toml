@@ -1,0 +1,16 @@
+[package]
+name = "tokenbuddy-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokenbuddy-codex-session = { path = "../adapters/codex-session" }
+tokenbuddy-domain.workspace = true
+tokenbuddy-storage.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -12,6 +12,31 @@ export type IngestSource =
   | "estimated";
 export type PrecisionLevel =
   "verified" | "exact_session" | "correlated" | "estimated" | "unavailable";
+export type CollectionStatus = "starting" | "collecting" | "idle" | "error";
+
+export interface QuotaSummary {
+  window_type: string;
+  used_percent: number | null;
+  remaining_percent: number | null;
+  reset_at: string | null;
+  credits_remaining: number | null;
+  precision: PrecisionLevel;
+}
+
+export interface QuickSummary {
+  collection_status: CollectionStatus;
+  active_app: AppKind | null;
+  active_session_title: string | null;
+  provider_name: string | null;
+  model: string | null;
+  session_input_tokens: number | null;
+  session_cache_read_tokens: number | null;
+  session_output_tokens: number | null;
+  session_cache_hit_rate: number | null;
+  today_total_tokens: number | null;
+  quota_summary: QuotaSummary | null;
+  latest_warning: string | null;
+}
 
 export interface NormalizedUsage {
   input_tokens_total: number | null;
@@ -75,6 +100,11 @@ export interface UsageEvent {
   raw_usage_json: Record<string, unknown> | null;
 }
 
+export interface UsageEventPage {
+  events: UsageEvent[];
+  total: number;
+}
+
 export interface SessionSummary {
   session: SessionRecord;
   totals: UsageTotals;
@@ -116,6 +146,7 @@ export interface RescanResult {
   upserted_sessions: number;
   updated_cursors: number;
   skipped_records: number;
+  warning: string | null;
 }
 
 export interface DetectionResult {
@@ -126,8 +157,53 @@ export interface DetectionResult {
   message: string | null;
 }
 
+export interface LocalWebApiStatus {
+  running: boolean;
+  url: string | null;
+}
+
+function inTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+async function request<T>(
+  command: string,
+  path: string,
+  args?: Record<string, unknown>,
+  init?: RequestInit,
+): Promise<T> {
+  if (inTauri()) {
+    return invoke<T>(command, args);
+  }
+  const response = await fetch(path, init);
+  const payload = (await response.json()) as T | { error?: string };
+  if (!response.ok) {
+    const error = payload as { error?: string };
+    throw new Error(error.error || `请求失败（${response.status}）`);
+  }
+  return payload as T;
+}
+
+function queryString(
+  values: Record<string, string | number | null | undefined>,
+): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (value != null && value !== "") query.set(key, String(value));
+  }
+  const encoded = query.toString();
+  return encoded ? `?${encoded}` : "";
+}
+
+export function getQuickSummary(): Promise<QuickSummary> {
+  return request<QuickSummary>("get_quick_summary", "/api/quick-summary");
+}
+
 export function getDashboardSummary(): Promise<DashboardSummary> {
-  return invoke<DashboardSummary>("get_dashboard_summary");
+  return request<DashboardSummary>(
+    "get_dashboard_summary",
+    "/api/dashboard-summary",
+  );
 }
 
 export function listSessions(
@@ -135,27 +211,96 @@ export function listSessions(
   limit = 50,
   offset = 0,
 ): Promise<SessionPage> {
-  return invoke<SessionPage>("list_sessions", { search, limit, offset });
+  return request<SessionPage>(
+    "list_sessions",
+    `/api/sessions${queryString({ search, limit, offset })}`,
+    { search, limit, offset },
+  );
 }
 
 export function getSessionDetail(
   sessionId: string,
 ): Promise<SessionDetail | null> {
-  return invoke<SessionDetail | null>("get_session_detail", {
-    sessionId,
-  });
+  return request<SessionDetail | null>(
+    "get_session_detail",
+    `/api/sessions/${encodeURIComponent(sessionId)}`,
+    { sessionId },
+  );
+}
+
+export function listUsageEvents(
+  sessionId: string | null = null,
+  limit = 100,
+  offset = 0,
+): Promise<UsageEventPage> {
+  return request<UsageEventPage>(
+    "list_usage_events",
+    `/api/usage-events${queryString({
+      session_id: sessionId,
+      limit,
+      offset,
+    })}`,
+    { sessionId, limit, offset },
+  );
 }
 
 export function listSources(): Promise<SourceRecord[]> {
-  return invoke<SourceRecord[]>("list_sources");
+  return request<SourceRecord[]>("list_sources", "/api/sources");
 }
 
 export function detectCodexPath(
   codexHome: string | null,
 ): Promise<DetectionResult> {
-  return invoke<DetectionResult>("detect_codex_path", { codexHome });
+  return request<DetectionResult>(
+    "detect_codex_path",
+    `/api/detect-codex${queryString({ codex_home: codexHome })}`,
+    { codexHome },
+  );
 }
 
 export function rescanCodex(codexHome: string | null): Promise<RescanResult> {
-  return invoke<RescanResult>("rescan_codex", { codexHome });
+  return request<RescanResult>(
+    "rescan_codex",
+    "/api/rescan-codex",
+    {
+      codexHome,
+    },
+    inTauri()
+      ? undefined
+      : {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ codex_home: codexHome }),
+        },
+  );
+}
+
+export function startLocalWebApi(): Promise<LocalWebApiStatus> {
+  if (!inTauri()) {
+    return Promise.resolve({ running: true, url: window.location.origin });
+  }
+  return request<LocalWebApiStatus>(
+    "start_local_web_api",
+    "/api/local-web/status",
+  );
+}
+
+export function openLocalWebApi(): Promise<LocalWebApiStatus> {
+  if (!inTauri()) {
+    return Promise.resolve({ running: true, url: window.location.origin });
+  }
+  return request<LocalWebApiStatus>(
+    "open_local_web_api",
+    "/api/local-web/status",
+  );
+}
+
+export function getLocalWebApiStatus(): Promise<LocalWebApiStatus> {
+  if (!inTauri()) {
+    return Promise.resolve({ running: true, url: window.location.origin });
+  }
+  return request<LocalWebApiStatus>(
+    "get_local_web_api_status",
+    "/api/local-web/status",
+  );
 }

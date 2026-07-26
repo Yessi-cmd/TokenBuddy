@@ -2,13 +2,13 @@ mod migrations;
 
 use std::{collections::HashMap, path::Path, time::SystemTime};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use thiserror::Error;
 use tokenbuddy_domain::{
-    AppKind, DashboardSummary, ImportBatch, ImportCursor, LauncherKind, NormalizedUsage,
-    PrecisionLevel, SessionDetail, SessionPage, SessionRecord, SessionSummary, SourceRecord,
-    UsageEvent, UsageEventPage, UsageTotals,
+    AppKind, CollectionStatus, DashboardSummary, ImportBatch, ImportCursor, LauncherKind,
+    NormalizedUsage, PrecisionLevel, QuickSummary, SessionDetail, SessionPage, SessionRecord,
+    SessionSummary, SourceRecord, UsageEvent, UsageEventPage, UsageTotals,
 };
 
 pub type Result<T> = std::result::Result<T, StorageError>;
@@ -303,6 +303,137 @@ impl Database {
             period_end,
             totals,
         })
+    }
+
+    pub fn quick_summary(
+        &self,
+        now: DateTime<Utc>,
+        collection_status: CollectionStatus,
+        latest_warning: Option<String>,
+    ) -> Result<QuickSummary> {
+        let period_start = Utc
+            .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+            .single()
+            .ok_or_else(|| StorageError::InvalidDateTime {
+                field: "today_start".to_owned(),
+                value: now.to_rfc3339(),
+            })?;
+        let period_end = period_start + chrono::Duration::days(1);
+        let today_total_tokens = self.total_tokens_for_period(period_start, period_end)?;
+
+        let active = self
+            .connection
+            .query_row(
+                "SELECT u.app, u.session_id, s.title, u.model
+                 FROM usage_events u
+                 LEFT JOIN sessions s ON s.id = u.session_id
+                 ORDER BY u.occurred_at DESC, u.id DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        app_from_str(row.get::<_, String>(0)?).map_err(to_sql_error)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let session_totals = active
+            .as_ref()
+            .and_then(|(_, session_id, _, _)| session_id.as_deref())
+            .map(|session_id| self.session_usage_totals(session_id))
+            .transpose()?;
+
+        Ok(QuickSummary {
+            collection_status,
+            active_app: active.as_ref().map(|(app, _, _, _)| *app),
+            active_session_title: active.as_ref().and_then(|(_, _, title, _)| title.clone()),
+            provider_name: None,
+            model: active.and_then(|(_, _, _, model)| model),
+            session_input_tokens: session_totals
+                .as_ref()
+                .and_then(|totals| totals.input_tokens_total),
+            session_cache_read_tokens: session_totals
+                .as_ref()
+                .and_then(|totals| totals.cache_read_tokens),
+            session_output_tokens: session_totals
+                .as_ref()
+                .and_then(|totals| totals.output_tokens_total),
+            session_cache_hit_rate: session_totals
+                .as_ref()
+                .and_then(|totals| totals.cache_hit_rate_percent),
+            today_total_tokens,
+            quota_summary: None,
+            latest_warning,
+        })
+    }
+
+    fn session_usage_totals(&self, session_id: &str) -> Result<UsageTotals> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*), SUM(input_tokens_total), SUM(input_tokens_uncached),
+                        SUM(cache_read_tokens), SUM(cache_write_tokens),
+                        SUM(output_tokens_total), SUM(reasoning_tokens),
+                        SUM(visible_output_tokens), SUM(provider_reported_cost),
+                        SUM(estimated_cost)
+                 FROM usage_events WHERE session_id = ?1",
+                params![session_id],
+                totals_from_row,
+            )
+            .map_err(Into::into)
+    }
+
+    fn total_tokens_for_period(
+        &self,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+    ) -> Result<Option<u64>> {
+        let (event_count, input_count, output_count, input_sum, output_sum): (
+            i64,
+            i64,
+            i64,
+            Option<i64>,
+            Option<i64>,
+        ) = self.connection.query_row(
+            "SELECT COUNT(*), COUNT(input_tokens_total), COUNT(output_tokens_total),
+                        SUM(input_tokens_total), SUM(output_tokens_total)
+                 FROM usage_events
+                 WHERE occurred_at >= ?1 AND occurred_at < ?2",
+            params![period_start.to_rfc3339(), period_end.to_rfc3339()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+        if event_count == 0 {
+            return Ok(Some(0));
+        }
+        if input_count != event_count || output_count != event_count {
+            return Ok(None);
+        }
+        let input = option_u64(input_sum, "input_tokens_total")?.ok_or_else(|| {
+            StorageError::InvalidTokenCount {
+                field: "input_tokens_total".to_owned(),
+            }
+        })?;
+        let output = option_u64(output_sum, "output_tokens_total")?.ok_or_else(|| {
+            StorageError::InvalidTokenCount {
+                field: "output_tokens_total".to_owned(),
+            }
+        })?;
+        input
+            .checked_add(output)
+            .map(Some)
+            .ok_or_else(|| StorageError::InvalidTokenCount {
+                field: "today_total_tokens".to_owned(),
+            })
     }
 }
 
@@ -756,8 +887,8 @@ fn to_sql_error(error: StorageError) -> rusqlite::Error {
 mod tests {
     use chrono::{Duration, Utc};
     use tokenbuddy_domain::{
-        AppKind, ImportBatch, ImportCursor, IngestSource, LauncherKind, NormalizedUsage,
-        PrecisionLevel, SessionRecord, SourceRecord, UsageEvent,
+        AppKind, CollectionStatus, ImportBatch, ImportCursor, IngestSource, LauncherKind,
+        NormalizedUsage, PrecisionLevel, SessionRecord, SourceRecord, UsageEvent,
     };
 
     use super::Database;
@@ -890,5 +1021,11 @@ mod tests {
         assert_eq!(page.sessions[0].totals.input_tokens_total, Some(100));
         assert_eq!(page.sessions[0].totals.output_tokens_total, Some(30));
         assert_eq!(page.sessions[0].totals.cache_hit_rate_percent, Some(25.0));
+
+        let quick = database
+            .quick_summary(Utc::now(), CollectionStatus::Collecting, None)
+            .expect("quick summary");
+        assert_eq!(quick.session_output_tokens, Some(30));
+        assert_eq!(quick.today_total_tokens, None);
     }
 }
