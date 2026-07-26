@@ -4,6 +4,13 @@
 
 ## 2026-07-27
 
+- **H3 · domain 文档注释补全**（274 → 0）
+  为共享词汇表的每个公开项写了文档：五个枚举的每个变体（含 §6.1 来源优先级与 §14 精度
+  分级的语义）、`UsageEvent` 的四个分维度精度字段、`NormalizedUsage` 为何用 `Option`
+  而非 0、`checked_delta` 为何拒绝下溢、`UsageTotals` 为何在任一事件缺字段时返回 `None`。
+  末尾开启 `#![warn(missing_docs)]`，配合 `clippy -D warnings` 使新增未文档化的公开项
+  直接构建失败。
+
 - **H2 + M6 · 抽取只读 SQLite 读取机制与账号指纹**（commit 见下）
   六个逐字重复的 helper 收进新 crate `tokenbuddy-sqlite-source`，`fingerprint` 收进
   `domain::account_fingerprint`（它承载 §20.2 的隐私约定，与 `AccountRecord` 同处才只有一处
