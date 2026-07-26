@@ -2,6 +2,9 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import App from "./App";
 import {
+  detectClaudePath,
+  detectCodexPath,
+  exportUsage,
   getAppSettings,
   getDashboardSummary,
   getModelBreakdown,
@@ -13,7 +16,13 @@ import {
   listQuotaSnapshots,
   listSessions,
   listSources,
+  openLocalWebApi,
   pickDirectory,
+  rescanCcSwitch,
+  rescanClaude,
+  rescanCockpit,
+  rescanCodex,
+  saveExport,
   showMainWindow,
   updateAppSettings,
 } from "./lib/api";
@@ -314,5 +323,544 @@ describe("App", () => {
     expect(
       screen.queryByRole("button", { name: "Codex Home：浏览" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The panels' behaviour beyond first render: the actions a user actually
+ * clicks, and what each view shows when its query fails. A failed query must
+ * become a visible message — never an empty panel that reads as "no usage".
+ */
+describe("App panels", () => {
+  const session = {
+    session: {
+      id: "codex-session:abc",
+      external_session_id: "abc",
+      parent_session_id: null,
+      app: "codex" as const,
+      launcher: "direct" as const,
+      project_path: "/sanitized/project",
+      title: "Fixture session",
+      started_at: "2026-07-26T08:00:00Z",
+      ended_at: "2026-07-26T08:10:00Z",
+      source_id: "codex-session",
+      created_at: "2026-07-26T08:00:00Z",
+      updated_at: "2026-07-26T08:10:00Z",
+    },
+    totals,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getDashboardSummary).mockResolvedValue({
+      period_start: "2026-07-26T00:00:00Z",
+      period_end: "2026-07-27T00:00:00Z",
+      totals,
+    });
+    vi.mocked(getModelBreakdown).mockResolvedValue([]);
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [], total: 0 });
+    vi.mocked(listSources).mockResolvedValue([]);
+    vi.mocked(listProviders).mockResolvedValue([]);
+    vi.mocked(listQuotaSnapshots).mockResolvedValue([]);
+    vi.mocked(listAccounts).mockResolvedValue([]);
+    vi.mocked(getSessionDetail).mockResolvedValue(null);
+    vi.mocked(getAppSettings).mockResolvedValue({
+      codex_home: null,
+      claude_home: null,
+      cc_switch_db_path: null,
+      cockpit_path: null,
+      otel_port: null,
+      auto_start: false,
+      proxy_enabled: false,
+      save_request_metadata: false,
+      data_retention_days: null,
+    });
+  });
+
+  afterEach(() => {
+    window.history.pushState({}, "", "/");
+  });
+
+  it("lists sessions and reports a failure instead of showing an empty list", async () => {
+    vi.mocked(listSessions).mockResolvedValue({
+      sessions: [session],
+      total: 1,
+    });
+    window.history.pushState({}, "", "/sessions");
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Fixture session")).toBeInTheDocument();
+    });
+    // App and project share one line in the session row.
+    expect(screen.getByText(/\/sanitized\/project/)).toBeInTheDocument();
+
+    vi.mocked(listSessions).mockRejectedValue(new Error("核心不可用"));
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText(/无法读取会话列表/)).toBeInTheDocument();
+    });
+  });
+
+  it("shows a session's request timeline, and says so when the id is unknown", async () => {
+    vi.mocked(getSessionDetail).mockResolvedValue({
+      summary: session,
+      usage_events: [
+        {
+          id: "event-1",
+          occurred_at: "2026-07-26T08:00:01Z",
+          app: "codex",
+          launcher: "direct",
+          ingest_source: "session_log",
+          source_id: "codex-session",
+          provider_id: "openai",
+          account_id: null,
+          session_id: "codex-session:abc",
+          parent_session_id: null,
+          request_id: "request-001",
+          response_id: null,
+          model: "gpt-5-codex",
+          query_source: null,
+          usage: {
+            input_tokens_total: 100,
+            input_tokens_uncached: 75,
+            cache_read_tokens: 25,
+            cache_write_tokens: null,
+            output_tokens_total: 30,
+            reasoning_tokens: 5,
+            visible_output_tokens: 25,
+          },
+          provider_reported_cost: null,
+          estimated_cost: null,
+          currency: null,
+          http_status: null,
+          latency_ms: null,
+          success: true,
+          precision_token: "exact_session",
+          precision_session: "exact_session",
+          precision_provider: "unavailable",
+          precision_account: "unavailable",
+          raw_event_hash: "event-1",
+          raw_usage_json: null,
+        },
+      ],
+    });
+    window.history.pushState({}, "", "/sessions/codex-session%3Aabc");
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/request-001/)).toBeInTheDocument();
+    });
+    expect(screen.getAllByText("Exact session").length).toBeGreaterThan(0);
+    expect(getSessionDetail).toHaveBeenCalledWith("codex-session:abc");
+
+    vi.mocked(getSessionDetail).mockResolvedValue(null);
+    render(<App />);
+    await waitFor(() => {
+      expect(
+        screen.getAllByText(/会话不存在|Unavailable/).length,
+      ).toBeGreaterThan(0);
+    });
+  });
+
+  it("shows each source's health on the sources page", async () => {
+    vi.mocked(listSources).mockResolvedValue([
+      {
+        id: "codex-session",
+        adapter_type: "codex_session",
+        display_name: "Codex Sessions",
+        path_or_endpoint: "/sanitized/codex",
+        enabled: true,
+        detected_version: "jsonl",
+        health_status: "healthy",
+        last_success_at: "2026-07-26T08:00:00Z",
+        last_error: null,
+        created_at: "2026-07-26T07:00:00Z",
+        updated_at: "2026-07-26T08:00:00Z",
+      },
+    ]);
+    window.history.pushState({}, "", "/sources");
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Codex Sessions")).toBeInTheDocument();
+    });
+    expect(screen.getByText("/sanitized/codex")).toBeInTheDocument();
+
+    vi.mocked(listSources).mockRejectedValue(new Error("核心不可用"));
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText(/无法读取数据源状态/)).toBeInTheDocument();
+    });
+  });
+
+  it("reports each detection independently", async () => {
+    vi.mocked(detectCodexPath).mockResolvedValue({
+      source_id: "codex-session",
+      detected: true,
+      path_or_endpoint: "/sanitized/codex",
+      detected_version: "jsonl",
+      message: null,
+    });
+    vi.mocked(detectClaudePath).mockRejectedValue(new Error("路径无效"));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "检测 Codex" }));
+    await waitFor(() => {
+      expect(
+        screen.getByText("已检测到 Codex Session 目录"),
+      ).toBeInTheDocument();
+    });
+
+    // A failing detection surfaces as an error, and does not erase the previous
+    // successful result.
+    fireEvent.click(screen.getByRole("button", { name: "检测 Claude" }));
+    await waitFor(() => {
+      expect(screen.getByText(/无法检测 Claude Home/)).toBeInTheDocument();
+    });
+    expect(screen.getByText("Codex Detected")).toBeInTheDocument();
+  });
+
+  it("scans every source independently and reports partial failure", async () => {
+    const report = {
+      inserted_events: 3,
+      duplicate_events: 0,
+      upserted_sessions: 1,
+      updated_cursors: 1,
+      skipped_records: 2,
+      warning: null,
+    };
+    vi.mocked(rescanCodex).mockResolvedValue(report);
+    vi.mocked(rescanClaude).mockResolvedValue({
+      ...report,
+      inserted_events: 1,
+    });
+    vi.mocked(rescanCcSwitch).mockRejectedValue(new Error("数据库被占用"));
+    vi.mocked(rescanCockpit).mockResolvedValue({
+      ...report,
+      inserted_events: 0,
+      skipped_records: 0,
+      warning: "Cockpit 请求日志为空",
+    });
+    render(<App />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "扫描全部来源" }),
+    );
+
+    // The two successful sources are still counted; the failure is named rather
+    // than discarding the whole scan.
+    await waitFor(() => {
+      expect(
+        screen.getByText("扫描完成：新增 4 条事件，跳过 4 条记录"),
+      ).toBeInTheDocument();
+    });
+    const problems = screen.getByText(/CC-Switch 扫描失败/);
+    expect(problems).toHaveTextContent("数据库被占用");
+    expect(problems).toHaveTextContent("Cockpit 请求日志为空");
+  });
+
+  it("exports through the browser download path and reports failures", async () => {
+    vi.mocked(isDesktopRuntime).mockReturnValue(false);
+    vi.mocked(exportUsage).mockResolvedValue({
+      filename: "usage.csv",
+      mime_type: "text/csv;charset=utf-8",
+      content: "occurred_at\n",
+    });
+    const createObjectURL = vi.fn(() => "blob:usage");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "导出 CSV" }));
+    await waitFor(() => {
+      expect(screen.getByText("已导出 usage.csv")).toBeInTheDocument();
+    });
+    expect(createObjectURL).toHaveBeenCalled();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:usage");
+
+    vi.mocked(exportUsage).mockRejectedValue(new Error("磁盘已满"));
+    fireEvent.click(screen.getByRole("button", { name: "导出 JSON" }));
+    await waitFor(() => {
+      expect(screen.getByText(/无法导出 JSON/)).toBeInTheDocument();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("writes the export to disk in the desktop shell instead of downloading", async () => {
+    vi.mocked(isDesktopRuntime).mockReturnValue(true);
+    vi.mocked(saveExport).mockResolvedValue(
+      "/Users/fixture/Downloads/usage.json",
+    );
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "导出 JSON" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("已导出到 /Users/fixture/Downloads/usage.json"),
+      ).toBeInTheDocument();
+    });
+    expect(exportUsage).not.toHaveBeenCalled();
+  });
+
+  it("opens the local web panel and reports why it could not start", async () => {
+    vi.mocked(openLocalWebApi).mockResolvedValue({
+      running: true,
+      url: "http://127.0.0.1:5173",
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "本地网页" }));
+    await waitFor(() => {
+      expect(
+        screen.getByText("本地网页面板已启动：http://127.0.0.1:5173"),
+      ).toBeInTheDocument();
+    });
+
+    vi.mocked(openLocalWebApi).mockRejectedValue(new Error("端口被占用"));
+    fireEvent.click(screen.getByRole("button", { name: "本地网页" }));
+    await waitFor(() => {
+      expect(screen.getByText(/无法启动本地网页面板/)).toBeInTheDocument();
+    });
+  });
+
+  it("saves settings and surfaces a rejected save", async () => {
+    vi.mocked(updateAppSettings).mockImplementation(
+      async (settings) => settings,
+    );
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+
+    const codexHome = await screen.findByLabelText("Codex Home");
+    fireEvent.change(codexHome, { target: { value: "/sanitized/codex" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("设置已保存")).toBeInTheDocument();
+    });
+    expect(updateAppSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ codex_home: "/sanitized/codex" }),
+    );
+
+    vi.mocked(updateAppSettings).mockRejectedValue(new Error("数据库只读"));
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => {
+      expect(screen.getByText(/设置保存失败/)).toBeInTheDocument();
+    });
+  });
+
+  it("says the settings could not be read rather than showing blank defaults", async () => {
+    vi.mocked(getAppSettings).mockRejectedValue(new Error("核心不可用"));
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("无法读取 Core 设置。")).toBeInTheDocument();
+    });
+    expect(screen.getByText("设置不可用")).toBeInTheDocument();
+  });
+
+  it("shows providers with their aggregates", async () => {
+    vi.mocked(listProviders).mockResolvedValue([
+      {
+        id: "openai",
+        provider_family: "openai",
+        display_name: "OpenAI",
+        upstream_url: "https://api.openai.com/v1",
+        launcher: "direct",
+        source_id: "codex-session",
+        account_count: 1,
+        request_count: 2,
+        successful_request_count: 2,
+        success_rate_percent: 100,
+        average_latency_ms: 320,
+        totals,
+      },
+    ]);
+    window.history.pushState({}, "", "/providers");
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("OpenAI")).toBeInTheDocument();
+    });
+    expect(screen.getByText("https://api.openai.com/v1")).toBeInTheDocument();
+  });
+
+  it("shows a quota snapshot with the precision it was recorded at", async () => {
+    vi.mocked(listQuotaSnapshots).mockResolvedValue([
+      {
+        id: "quota-1",
+        account_id: "openai:chatgpt:abc",
+        account_name: "user@example.com",
+        provider_name: "OpenAI",
+        captured_at: "2026-07-26T10:00:00Z",
+        window_type: "primary_5h",
+        used_percent: 12.5,
+        remaining_percent: 87.5,
+        reset_at: "2026-07-26T15:00:00Z",
+        credits_remaining: null,
+        precision: "correlated",
+        raw_json: null,
+      },
+    ]);
+    window.history.pushState({}, "", "/quotas");
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("primary_5h")).toBeInTheDocument();
+    });
+    expect(screen.getByText("12.5% 已用")).toBeInTheDocument();
+    expect(screen.getByText(/Correlated/)).toBeInTheDocument();
+  });
+
+  it("keeps unavailable dashboard values out of the totals", async () => {
+    vi.mocked(getDashboardSummary).mockResolvedValue({
+      period_start: "2026-07-26T00:00:00Z",
+      period_end: "2026-07-27T00:00:00Z",
+      totals: {
+        ...totals,
+        // One event lacked the field, so the total is unknown — it must not be
+        // rendered as 0.
+        cache_read_tokens: null,
+        cache_hit_rate_percent: null,
+      },
+    });
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("数据已从本地 SQLite 加载")).toBeInTheDocument();
+    });
+    expect(screen.getAllByText("Unavailable").length).toBeGreaterThan(0);
+  });
+
+  it("reports a dashboard query failure", async () => {
+    vi.mocked(getDashboardSummary).mockRejectedValue(new Error("核心不可用"));
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("无法读取本地数据层")).toBeInTheDocument();
+    });
+  });
+});
+
+/**
+ * The tray popover is the surface most users see most often, and the one with
+ * the strictest contract: it may only read the Core's pre-aggregated summary.
+ */
+describe("Quick summary panel", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(isDesktopRuntime).mockReturnValue(true);
+    window.history.pushState({}, "", "/quick");
+  });
+
+  afterEach(() => {
+    window.history.pushState({}, "", "/");
+  });
+
+  it("shows the official quota window and the newest warning", async () => {
+    vi.mocked(getQuickSummary).mockResolvedValue({
+      collection_status: "collecting",
+      active_app: "codex",
+      active_session_id: "codex-session:abc",
+      active_session_title: "Fixture session",
+      active_project_path: "/sanitized/project",
+      provider_name: "OpenAI",
+      model: "gpt-5-codex",
+      session_input_tokens: 100,
+      session_cache_read_tokens: 20,
+      session_output_tokens: 40,
+      session_cache_hit_rate: 20,
+      today_total_tokens: 140,
+      quota_summary: {
+        window_type: "primary_5h",
+        used_percent: 18.75,
+        remaining_percent: 81.25,
+        reset_at: "2026-07-26T15:00:00Z",
+        credits_remaining: null,
+        precision: "correlated",
+      },
+      latest_warning: "Cockpit 请求日志为空",
+    });
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Cockpit 请求日志为空")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/primary_5h/)).toBeInTheDocument();
+    expect(screen.getByText(/18\.8%|18\.75%/)).toBeInTheDocument();
+  });
+
+  it("states what is unknown instead of showing zeros", async () => {
+    vi.mocked(getQuickSummary).mockResolvedValue({
+      collection_status: "idle",
+      active_app: null,
+      active_session_id: null,
+      active_session_title: null,
+      active_project_path: null,
+      provider_name: null,
+      model: null,
+      session_input_tokens: null,
+      session_cache_read_tokens: null,
+      session_output_tokens: null,
+      session_cache_hit_rate: null,
+      today_total_tokens: null,
+      quota_summary: null,
+      latest_warning: null,
+    });
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("待机")).toBeInTheDocument();
+    });
+    // Nothing collected yet is "Unavailable", never 0.
+    expect(screen.getAllByText("Unavailable").length).toBeGreaterThan(0);
+    expect(screen.queryByText("0")).not.toBeInTheDocument();
+  });
+
+  it("reports a failed summary read", async () => {
+    vi.mocked(getQuickSummary).mockRejectedValue(new Error("核心不可用"));
+    render(<App />);
+
+    // The failure text is the cause itself, so the popover says what went wrong
+    // rather than rendering an empty panel.
+    await waitFor(() => {
+      expect(screen.getByText(/无法读取后台 Core/)).toHaveTextContent(
+        "核心不可用",
+      );
+    });
+  });
+
+  it("opens the local web panel from the tray without throwing on failure", async () => {
+    vi.mocked(getQuickSummary).mockResolvedValue({
+      collection_status: "collecting",
+      active_app: "codex",
+      active_session_id: "codex-session:abc",
+      active_session_title: "Fixture session",
+      active_project_path: "/sanitized/project",
+      provider_name: "OpenAI",
+      model: "gpt-5-codex",
+      session_input_tokens: 100,
+      session_cache_read_tokens: 20,
+      session_output_tokens: 40,
+      session_cache_hit_rate: 20,
+      today_total_tokens: 140,
+      quota_summary: null,
+      latest_warning: null,
+    });
+    vi.mocked(openLocalWebApi).mockRejectedValue(new Error("端口被占用"));
+    render(<App />);
+
+    const openWeb = await screen.findByRole("button", {
+      name: "打开本地网页面板…",
+    });
+    fireEvent.click(openWeb);
+
+    // A failure here is logged, not thrown into the popover's render path.
+    await waitFor(() => {
+      expect(openLocalWebApi).toHaveBeenCalled();
+    });
+    expect(screen.getByText("Fixture session")).toBeInTheDocument();
   });
 });

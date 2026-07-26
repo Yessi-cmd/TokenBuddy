@@ -244,7 +244,13 @@ function DashboardView() {
   const [cockpitDetection, setCockpitDetection] =
     useState<DetectionResult | null>(null);
   const [status, setStatus] = useState("正在连接本地数据层…");
-  const [error, setError] = useState<string | null>(null);
+  // Two error slots on purpose. The overview reloads every few seconds and on
+  // every scan, and its success path used to clear whatever was on screen —
+  // which erased the result of the action that triggered the reload before the
+  // user could read it. Loading owns one slot, user actions own the other.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const error = actionError ?? loadError;
   const [isScanning, setIsScanning] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [filterForm, setFilterForm] = useState<DashboardFilterForm>(
@@ -275,16 +281,18 @@ function DashboardView() {
         setSessions(nextSessions.sessions);
         setSources(nextSources);
         setStatus("数据已从本地 SQLite 加载");
-        setError(null);
+        setLoadError(null);
       } catch (cause) {
         if (!active) return;
         console.error("加载总览失败", cause);
         if (isDesktopRuntime()) {
           setStatus("无法读取本地数据层");
-          setError(`读取本地数据层失败：${describeError(cause)}`);
+          setLoadError(`读取本地数据层失败：${describeError(cause)}`);
         } else {
           setStatus("请通过 Tauri 启动以连接本地数据层");
-          setError("浏览器预览没有 Tauri IPC；桌面应用启动后会显示真实数据。");
+          setLoadError(
+            "浏览器预览没有 Tauri IPC；桌面应用启动后会显示真实数据。",
+          );
         }
       }
     }
@@ -317,7 +325,7 @@ function DashboardView() {
         if (active) setDetail(nextDetail);
       } catch (cause) {
         console.error("读取会话详情失败", cause);
-        if (active) setError(`无法读取会话详情：${describeError(cause)}`);
+        if (active) setActionError(`无法读取会话详情：${describeError(cause)}`);
       }
     }
 
@@ -345,10 +353,10 @@ function DashboardView() {
           ? "已检测到 Codex Session 目录"
           : "未检测到 Codex Session 目录",
       );
-      setError(null);
+      setActionError(null);
     } catch (cause) {
       console.error("检测 Codex Home 失败", cause);
-      setError(`无法检测 Codex Home：${describeError(cause)}`);
+      setActionError(`无法检测 Codex Home：${describeError(cause)}`);
     }
   }
 
@@ -361,10 +369,10 @@ function DashboardView() {
           ? "已检测到 Claude Code projects 目录"
           : "未检测到 Claude Code projects 目录",
       );
-      setError(null);
+      setActionError(null);
     } catch (cause) {
       console.error("检测 Claude Home 失败", cause);
-      setError(`无法检测 Claude Home：${describeError(cause)}`);
+      setActionError(`无法检测 Claude Home：${describeError(cause)}`);
     }
   }
 
@@ -377,10 +385,10 @@ function DashboardView() {
           ? "已检测到 CC-Switch 数据库"
           : "未检测到 CC-Switch 数据库",
       );
-      setError(null);
+      setActionError(null);
     } catch (cause) {
       console.error("检测 CC-Switch 失败", cause);
-      setError(`无法检测 CC-Switch：${describeError(cause)}`);
+      setActionError(`无法检测 CC-Switch：${describeError(cause)}`);
     }
   }
 
@@ -393,10 +401,10 @@ function DashboardView() {
           ? "已检测到 Cockpit 数据库"
           : "未检测到 Cockpit 数据库",
       );
-      setError(null);
+      setActionError(null);
     } catch (cause) {
       console.error("检测 Cockpit 失败", cause);
-      setError(`无法检测 Cockpit：${describeError(cause)}`);
+      setActionError(`无法检测 Cockpit：${describeError(cause)}`);
     }
   }
 
@@ -432,7 +440,7 @@ function DashboardView() {
       }
     }
     setStatus(`扫描完成：新增 ${inserted} 条事件，跳过 ${skipped} 条记录`);
-    setError(problems.length ? problems.join("；") : null);
+    setActionError(problems.length ? problems.join("；") : null);
     setRefreshVersion((value) => value + 1);
     setIsScanning(false);
   }
@@ -443,10 +451,10 @@ function DashboardView() {
       setStatus(
         result.url ? `本地网页面板已启动：${result.url}` : "本地网页面板已启动",
       );
-      setError(null);
+      setActionError(null);
     } catch (cause) {
       console.error("启动本地网页面板失败", cause);
-      setError(`无法启动本地网页面板：${describeError(cause)}`);
+      setActionError(`无法启动本地网页面板：${describeError(cause)}`);
     }
   }
 
@@ -469,10 +477,12 @@ function DashboardView() {
         URL.revokeObjectURL(url);
         setStatus(`已导出 ${result.filename}`);
       }
-      setError(null);
+      setActionError(null);
     } catch (cause) {
       console.error(`导出 ${format} 失败`, cause);
-      setError(`无法导出 ${format.toUpperCase()}：${describeError(cause)}`);
+      setActionError(
+        `无法导出 ${format.toUpperCase()}：${describeError(cause)}`,
+      );
     } finally {
       setExportingFormat(null);
     }
