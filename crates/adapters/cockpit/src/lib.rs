@@ -278,9 +278,7 @@ impl CockpitAdapter {
                 .filter(|value| !value.is_empty())
                 .or_else(|| string_col(row, &names, "email").filter(|value| !value.is_empty()))
             {
-                let activity = account_activity
-                    .entry(account_key)
-                    .or_default();
+                let activity = account_activity.entry(account_key).or_default();
                 if activity.label.is_none() {
                     activity.label =
                         string_col(row, &names, "email").filter(|value| !value.is_empty());
