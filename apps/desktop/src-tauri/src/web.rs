@@ -131,7 +131,16 @@ fn serve(
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     accepted = true;
-                    let _ = handle_connection(&mut stream, &core, &static_root, autostart.as_ref());
+                    // The listeners poll non-blocking, but the connection must
+                    // not: on BSD-derived systems (macOS) an accepted socket
+                    // inherits O_NONBLOCK from its listener, which makes
+                    // `set_read_timeout` a no-op and turns "the request bytes
+                    // have not arrived yet" into `WouldBlock`. That error is
+                    // indistinguishable from a dead peer here, so the connection
+                    // was dropped without a response and the client saw a reset.
+                    let _ = stream.set_nonblocking(false).and_then(|()| {
+                        handle_connection(&mut stream, &core, &static_root, autostart.as_ref())
+                    });
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(_) => return,
@@ -585,6 +594,7 @@ mod tests {
         net::{Ipv6Addr, TcpStream},
         path::PathBuf,
         sync::Arc,
+        thread,
         time::{Duration, Instant},
     };
 
@@ -650,6 +660,50 @@ mod tests {
             query_value("search=hello%20world&limit=10", "limit"),
             Some("10".to_owned())
         );
+    }
+
+    /// A client that connects and only then writes must still be served.
+    ///
+    /// The listeners are non-blocking so the accept loop can poll both address
+    /// families; on macOS the accepted connection inherited that flag, so a
+    /// request whose bytes arrived a moment after the connection was answered
+    /// with a dropped socket instead of a response. The delay here makes that
+    /// window certain rather than a race that only shows up on a loaded CI box.
+    #[test]
+    fn a_request_written_after_the_connection_is_established_still_gets_a_response() {
+        let database = tempdir().expect("database directory");
+        let core = Core::start(CoreConfig::new(
+            database.path().join("tokenbuddy.sqlite3"),
+            None,
+        ))
+        .expect("core starts");
+        let root = tempdir().expect("web root");
+        let server = LocalWebServer::start(Arc::clone(&core), root.path().to_owned())
+            .expect("server starts");
+        let port = server
+            .status()
+            .url
+            .expect("url")
+            .rsplit(':')
+            .next()
+            .expect("port")
+            .parse::<u16>()
+            .expect("port number");
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        thread::sleep(Duration::from_millis(150));
+        stream
+            .write_all(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .expect("request");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("response");
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "late request was dropped: {response:?}"
+        );
+        assert!(response.contains("\"ok\":true"));
+        core.shutdown().expect("core stops");
     }
 
     #[test]
