@@ -864,3 +864,190 @@ describe("Quick summary panel", () => {
     expect(screen.getByText("Fixture session")).toBeInTheDocument();
   });
 });
+
+/**
+ * Filters, navigation, and the remaining source controls — the interactions
+ * that decide *which* numbers the panel is showing.
+ */
+describe("Dashboard filters and navigation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getDashboardSummary).mockResolvedValue({
+      period_start: "2026-07-26T00:00:00Z",
+      period_end: "2026-07-27T00:00:00Z",
+      totals,
+    });
+    vi.mocked(getModelBreakdown).mockResolvedValue([]);
+    vi.mocked(listSessions).mockResolvedValue({ sessions: [], total: 0 });
+    vi.mocked(listSources).mockResolvedValue([]);
+    vi.mocked(getSessionDetail).mockResolvedValue(null);
+    vi.mocked(isDesktopRuntime).mockReturnValue(false);
+  });
+
+  afterEach(() => {
+    window.history.pushState({}, "", "/");
+  });
+
+  it("re-queries with every filter the user narrows by", async () => {
+    render(<App />);
+    await waitFor(() => {
+      expect(getDashboardSummary).toHaveBeenCalled();
+    });
+
+    fireEvent.change(screen.getByLabelText("Model"), {
+      target: { value: "gpt-5-codex" },
+    });
+    fireEvent.change(screen.getByLabelText("Account ID"), {
+      target: { value: "openai:local" },
+    });
+    fireEvent.change(screen.getByLabelText("搜索"), {
+      target: { value: "fixture" },
+    });
+
+    // The metric cards and the session list must be narrowed by the same
+    // filters, or the two halves of the screen would disagree.
+    await waitFor(() => {
+      expect(getDashboardSummary).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          model: "gpt-5-codex",
+          account_id: "openai:local",
+          search: "fixture",
+        }),
+      );
+    });
+    expect(listSessions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ model: "gpt-5-codex" }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "清除筛选" }));
+    await waitFor(() => {
+      expect(getDashboardSummary).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          model: null,
+          account_id: null,
+          search: null,
+        }),
+      );
+    });
+  });
+
+  it("keeps the source path fields editable", async () => {
+    render(<App />);
+
+    const codexHome = await screen.findByLabelText("Codex Home");
+    fireEvent.change(codexHome, { target: { value: "/sanitized/codex" } });
+    expect(codexHome).toHaveValue("/sanitized/codex");
+
+    for (const [label, value] of [
+      ["Claude Home", "/sanitized/claude"],
+      ["CC-Switch DB", "/sanitized/cc.db"],
+      ["Cockpit DB", "/sanitized/cockpit.sqlite"],
+    ] as const) {
+      const field = screen.getByLabelText(label);
+      fireEvent.change(field, { target: { value } });
+      expect(field).toHaveValue(value);
+    }
+
+    // The typed path is what the scan uses, not the stored default.
+    vi.mocked(rescanCodex).mockResolvedValue({
+      inserted_events: 0,
+      duplicate_events: 0,
+      upserted_sessions: 0,
+      updated_cursors: 0,
+      skipped_records: 0,
+      warning: null,
+    });
+    vi.mocked(rescanClaude).mockResolvedValue({
+      inserted_events: 0,
+      duplicate_events: 0,
+      upserted_sessions: 0,
+      updated_cursors: 0,
+      skipped_records: 0,
+      warning: null,
+    });
+    vi.mocked(rescanCcSwitch).mockResolvedValue({
+      inserted_events: 0,
+      duplicate_events: 0,
+      upserted_sessions: 0,
+      updated_cursors: 0,
+      skipped_records: 0,
+      warning: null,
+    });
+    vi.mocked(rescanCockpit).mockResolvedValue({
+      inserted_events: 0,
+      duplicate_events: 0,
+      upserted_sessions: 0,
+      updated_cursors: 0,
+      skipped_records: 0,
+      warning: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "扫描全部来源" }));
+    await waitFor(() => {
+      expect(rescanCodex).toHaveBeenCalledWith("/sanitized/codex");
+    });
+    expect(rescanCockpit).toHaveBeenCalledWith("/sanitized/cockpit.sqlite");
+  });
+
+  it("opens a session's detail from the list", async () => {
+    const session = {
+      session: {
+        id: "codex-session:abc",
+        external_session_id: "abc",
+        parent_session_id: null,
+        app: "codex" as const,
+        launcher: "direct" as const,
+        project_path: "/sanitized/project",
+        title: "Fixture session",
+        started_at: "2026-07-26T08:00:00Z",
+        ended_at: "2026-07-26T08:10:00Z",
+        source_id: "codex-session",
+        created_at: "2026-07-26T08:00:00Z",
+        updated_at: "2026-07-26T08:10:00Z",
+      },
+      totals,
+    };
+    vi.mocked(listSessions).mockResolvedValue({
+      sessions: [session],
+      total: 1,
+    });
+    vi.mocked(getSessionDetail).mockResolvedValue({
+      summary: session,
+      usage_events: [],
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByText("Fixture session"));
+
+    await waitFor(() => {
+      expect(getSessionDetail).toHaveBeenCalledWith("codex-session:abc");
+    });
+  });
+
+  it("explains the browser preview instead of showing a Tauri error", async () => {
+    vi.mocked(isDesktopRuntime).mockReturnValue(false);
+    vi.mocked(getDashboardSummary).mockRejectedValue(new Error("no ipc"));
+    render(<App />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("请通过 Tauri 启动以连接本地数据层"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText(/浏览器预览没有 Tauri IPC/)).toBeInTheDocument();
+  });
+
+  it("navigates between routes through the nav links", async () => {
+    render(<App />);
+    await screen.findByRole("navigation", { name: "主要导航" });
+
+    fireEvent.click(screen.getByRole("link", { name: "数据源" }));
+    await waitFor(() => {
+      expect(window.location.pathname).toBe("/sources");
+    });
+
+    // A modified click is left to the browser so "open in new tab" still works.
+    const providers = screen.getByRole("link", { name: "Providers" });
+    fireEvent.click(providers, { metaKey: true });
+    expect(window.location.pathname).toBe("/sources");
+  });
+});
