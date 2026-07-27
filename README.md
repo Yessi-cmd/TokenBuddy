@@ -83,12 +83,31 @@ Tray-first：启动后只常驻一个后台采集 Core 并注册菜单栏 / 托�
 先决条件：Node.js 24+、pnpm 11+、Rust 1.93+，以及
 [Tauri 2 的平台依赖](https://v2.tauri.app/start/prerequisites/)。
 
+若 `pnpm` 不在 PATH 中（只装了 Node 而未启用 corepack 垫片），先执行一次
+`corepack enable`；或改用 `scripts/` 下的脚本，它们会自行处理。
+
 ```sh
 pnpm install
-pnpm dev              # 桌面壳 + 前端热更新
-pnpm build            # 打包安装程序
-pnpm build:web        # 仅构建前端
+sh scripts/dev.sh          # 从源码运行（热更新）
+sh scripts/build-app.sh    # 构建可安装的应用，并打印产物位置
+sh scripts/run-app.sh      # 启动已构建的应用（--window 强制显示窗口）
 ```
+
+对应的原始命令：`pnpm dev`、`pnpm build`、`pnpm build:web`。
+
+### 入口在哪里
+
+| 你要找的     | 位置                                                                          |
+| ------------ | ----------------------------------------------------------------------------- |
+| 程序入口     | `apps/desktop/src-tauri/src/main.rs` → `lib.rs` 的 `run()`                    |
+| 界面入口     | `apps/desktop/src/main.tsx` → `App.tsx`                                       |
+| 可执行文件   | `target/release/bundle/macos/TokenBuddy.app`（`pnpm build` 之后）             |
+| 裸二进制     | `target/debug/tokenbuddy-desktop`（`cargo build` 之后，macOS 上不便直接双击） |
+| 运行时数据库 | `~/Library/Application Support/com.tokenbuddy.desktop/tokenbuddy.sqlite3`     |
+
+**启动后看不到窗口是正常的。** 应用是托盘优先的：macOS 上以 accessory 模式启动，
+既不出现在 Dock 也不出现在应用切换器，只在菜单栏右侧有一个图标。单击它打开轻量摘要，
+双击打开完整面板。想让主窗口直接出现，用 `TOKENBUDDY_DEBUG_SHOW_WINDOWS=1`（仅 debug 构建）。
 
 提交前跑完整验证（与 CI 一致）：
 
