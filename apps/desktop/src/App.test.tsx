@@ -5,6 +5,7 @@ import {
   detectClaudePath,
   detectCodexPath,
   exportUsage,
+  fitQuickWindowToContent,
   getAppSettings,
   getDashboardSummary,
   getModelBreakdown,
@@ -38,6 +39,7 @@ vi.mock("./lib/api", () => ({
   getQuickSummary: vi.fn(),
   getSessionDetail: vi.fn(),
   exportUsage: vi.fn(),
+  fitQuickWindowToContent: vi.fn(() => Promise.resolve()),
   listAccounts: vi.fn(),
   listProviders: vi.fn(),
   listQuotaSnapshots: vi.fn(),
@@ -1049,5 +1051,58 @@ describe("Dashboard filters and navigation", () => {
     const providers = screen.getByRole("link", { name: "Providers" });
     fireEvent.click(providers, { metaKey: true });
     expect(window.location.pathname).toBe("/sources");
+  });
+});
+
+describe("Quick panel window fitting", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(fitQuickWindowToContent).mockResolvedValue();
+    vi.mocked(getQuickSummary).mockResolvedValue({
+      collection_status: "collecting",
+      active_app: "codex",
+      active_session_id: "codex-session:abc",
+      active_session_title: "Fixture session",
+      active_project_path: "/sanitized/project",
+      provider_name: "OpenAI",
+      model: "gpt-5-codex",
+      session_input_tokens: 100,
+      session_cache_read_tokens: 20,
+      session_output_tokens: 40,
+      session_cache_hit_rate: 20,
+      today_total_tokens: 140,
+      quota_summary: null,
+      latest_warning: null,
+    });
+    window.history.pushState({}, "", "/quick");
+  });
+
+  afterEach(() => {
+    window.history.pushState({}, "", "/");
+  });
+
+  it("asks the window to match the rendered content height", async () => {
+    // The popover window is created at a fixed height because Rust cannot know
+    // how tall the summary will be; whatever the content does not fill would
+    // otherwise show as dead space under the last row.
+    const shellHeight = 372;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      height: shellHeight,
+      width: 320,
+      top: 0,
+      left: 0,
+      right: 320,
+      bottom: shellHeight,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(fitQuickWindowToContent).toHaveBeenCalledWith(shellHeight);
+    });
+    vi.restoreAllMocks();
   });
 });

@@ -137,6 +137,10 @@ crates/adapters/*          四个只读来源适配器 + 共享的只读 SQLite 
 crates/core                长驻 Core：持有数据库连接、导入线程、QuickSummary
 apps/desktop/src-tauri     Tauri 外壳：托盘、窗口、命令、loopback HTTP 服务
 apps/desktop/src           React SPA，桌面面板与网页面板共用
+  App.tsx                  只做路由
+  features/<视图>/          七个视图各自独立
+  components/              跨视图共用的展示组件
+  lib/                     api 契约、筛选词汇、格式化、路由
 fixtures/                  脱敏解析样本，禁止使用真实数据
 docs/change-logs/          每批改动的变更日志
 ```

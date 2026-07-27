@@ -567,8 +567,13 @@ fn quick_window_builder<R: Runtime>(
 ) -> WebviewWindowBuilder<'_, R, AppHandle<R>> {
     let builder = WebviewWindowBuilder::new(app, "quick", WebviewUrl::App("/quick".into()))
         .title("TokenBuddy QuickSummary")
-        .inner_size(320.0, 500.0)
-        .min_inner_size(300.0, 460.0)
+        // A first-paint size only: the webview measures its own content and
+        // shrinks the window to fit (see `fitQuickWindowToContent`). The lower
+        // bound must therefore be small enough for a summary that has no quota
+        // window and no warning, or the popover keeps dead space below its last
+        // row.
+        .inner_size(320.0, 420.0)
+        .min_inner_size(300.0, 120.0)
         .decorations(false)
         .resizable(false)
         .always_on_top(true)

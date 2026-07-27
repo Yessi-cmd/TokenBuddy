@@ -349,6 +349,25 @@ export function saveExport(
   return invoke<string>("save_export", { format, filters });
 }
 
+// Desktop-only: make the tray popover exactly as tall as its content.
+//
+// The popover window is created at a fixed size because Rust cannot know how
+// tall the summary will render — a missing quota window or an extra warning
+// line changes it. Without this the window keeps its startup height and the
+// surplus shows as dead space below the last row.
+//
+// The window module is imported lazily so a browser build never loads it.
+export async function fitQuickWindowToContent(height: number): Promise<void> {
+  if (!inTauri()) return;
+  const { getCurrentWindow, LogicalSize } =
+    await import("@tauri-apps/api/window");
+  const window = getCurrentWindow();
+  const size = await window.innerSize();
+  const scale = await window.scaleFactor();
+  const width = size.toLogical(scale).width;
+  await window.setSize(new LogicalSize(width, Math.ceil(height)));
+}
+
 // Desktop-only: bring the full dashboard window forward.
 export function showMainWindow(): Promise<void> {
   return invoke<void>("show_main_window");

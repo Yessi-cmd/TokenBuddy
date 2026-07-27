@@ -993,7 +993,10 @@ h3 {
 }
 
 .menu-shell {
-  height: 100vh;
+  /* Sized by its content, not by the window: the window follows the content
+     (see QuickSummaryView), so stretching to 100vh here would paint the
+     surface over whatever empty space the window happened to start with. */
+  height: auto;
   min-height: 0;
   padding: 0;
   overflow: hidden;
@@ -1008,12 +1011,11 @@ h3 {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  height: 100vh;
+  height: auto;
   padding: 6px 7px 7px;
   color: var(--menu-fg);
   background: var(--menu-surface);
   backdrop-filter: blur(24px) saturate(180%);
-  overflow-y: auto;
 }
 
 .menu-header {
