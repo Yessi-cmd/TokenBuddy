@@ -7,7 +7,7 @@
 #![warn(missing_docs)]
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::OsStr,
     fs::{self, File},
     io::{self, BufRead, BufReader, Seek, SeekFrom},
@@ -204,6 +204,9 @@ impl ClaudeSessionAdapter {
             } else {
                 cursor.map_or(0, |value| value.snapshot_generation)
             },
+            current_model: (!cursor_is_stale)
+                .then(|| cursor.and_then(|value| value.last_model.clone()))
+                .flatten(),
         };
         let default_external_session_id = path
             .file_stem()
@@ -213,6 +216,7 @@ impl ClaudeSessionAdapter {
             .unwrap_or_else(|| resource_id.to_owned());
         let mut sessions = BTreeMap::<String, SessionRecord>::new();
         let mut usage_events = Vec::new();
+        let mut models_by_session = HashMap::<String, BTreeSet<String>>::new();
         let mut skipped_records = 0;
         let mut offset = start_offset;
         let file = File::open(path)?;
@@ -249,7 +253,17 @@ impl ClaudeSessionAdapter {
                 }
             };
 
-            let parsed = parse_record(&value, &default_external_session_id, &state);
+            let mut parsed = parse_record(&value, &default_external_session_id, &state);
+            // Claude records normally repeat the model, but some transcript
+            // variants put it only on an earlier assistant/session record.
+            // Carry it across the cursor boundary without changing the hash
+            // identity of a row that was previously stored without it.
+            let model_for_hash = parsed.context.model.clone();
+            if let Some(model) = parsed.context.model.clone() {
+                state.current_model = Some(model);
+            } else {
+                parsed.context.model = state.current_model.clone();
+            }
             if let Some(external_session_id) = &parsed.context.session_id {
                 state.current_session_id = Some(external_session_id.clone());
                 update_session(
@@ -261,6 +275,19 @@ impl ClaudeSessionAdapter {
 
             if parsed.context.inherited_history {
                 continue;
+            }
+            if let Some(model) = model_for_hash.as_ref() {
+                let external_session_id = parsed
+                    .context
+                    .session_id
+                    .clone()
+                    .or_else(|| state.current_session_id.clone())
+                    .unwrap_or_else(|| default_external_session_id.clone());
+                let session_id = self.session_id(&external_session_id);
+                models_by_session
+                    .entry(session_id)
+                    .or_default()
+                    .insert(model.clone());
             }
             let Some(candidate) = parsed.usage else {
                 continue;
@@ -318,9 +345,14 @@ impl ClaudeSessionAdapter {
                 resource_id,
                 line_offset,
                 &parsed.context,
+                model_for_hash.as_deref(),
                 &raw_usage_json,
                 candidate.cumulative.then_some(state.snapshot_generation),
             );
+            let provider_reported_cost = parsed
+                .context
+                .provider_reported_cost
+                .or_else(|| explicit_cost(&value));
             usage_events.push(UsageEvent {
                 id: raw_event_hash.clone(),
                 occurred_at: timestamp,
@@ -337,9 +369,9 @@ impl ClaudeSessionAdapter {
                 model: parsed.context.model.clone(),
                 query_source: parsed.context.query_source.clone(),
                 usage,
-                provider_reported_cost: None,
+                provider_reported_cost,
                 estimated_cost: None,
-                currency: None,
+                currency: provider_reported_cost.map(|_| "USD".to_owned()),
                 http_status: None,
                 latency_ms: None,
                 success: None,
@@ -352,6 +384,18 @@ impl ClaudeSessionAdapter {
             });
         }
 
+        for event in &mut usage_events {
+            if event.model.is_none()
+                && let Some(models) = event
+                    .session_id
+                    .as_ref()
+                    .and_then(|session_id| models_by_session.get(session_id))
+                && models.len() == 1
+            {
+                event.model = models.iter().next().cloned();
+            }
+        }
+
         let cursor = ImportCursor {
             source_id: SOURCE_ID.to_owned(),
             resource_id: resource_id.to_owned(),
@@ -362,6 +406,7 @@ impl ClaudeSessionAdapter {
             last_cumulative_usage: state.last_cumulative_usage,
             snapshot_generation: state.snapshot_generation,
             last_session_id: state.current_session_id,
+            last_model: state.current_model,
             updated_at: now(),
         };
 
@@ -448,6 +493,7 @@ struct ParsedFile {
 #[derive(Debug, Default)]
 struct ParseState {
     current_session_id: Option<String>,
+    current_model: Option<String>,
     last_cumulative_usage: Option<NormalizedUsage>,
     snapshot_generation: i64,
 }
@@ -466,6 +512,7 @@ struct ParseContext {
     project_path: Option<String>,
     title: Option<String>,
     model: Option<String>,
+    provider_reported_cost: Option<f64>,
     request_id: Option<String>,
     response_id: Option<String>,
     query_source: Option<String>,
@@ -564,8 +611,35 @@ fn parse_record(value: &Value, default_session_id: &str, state: &ParseState) -> 
             value,
             &["title", "session_title", "sessionTitle", "summary", "slug"],
         ),
-        model: explicit_string(value, &["model", "model_name", "modelName"])
-            .or_else(|| nested_string(value, "message", &["model", "model_name", "modelName"])),
+        model: explicit_string(
+            value,
+            &[
+                "model",
+                "model_name",
+                "modelName",
+                "model_id",
+                "modelId",
+                "model_slug",
+                "modelSlug",
+            ],
+        )
+        .or_else(|| {
+            nested_string(
+                value,
+                "message",
+                &[
+                    "model",
+                    "model_name",
+                    "modelName",
+                    "model_id",
+                    "modelId",
+                    "model_slug",
+                    "modelSlug",
+                ],
+            )
+        }),
+        provider_reported_cost: explicit_cost(value)
+            .or_else(|| nested_f64(value, "message", &["costUSD", "cost_usd"])),
         request_id: explicit_string(value, &["request_id", "requestId"]),
         response_id: explicit_string(value, &["response_id", "responseId"])
             .or_else(|| nested_string(value, "message", &["id", "message_id", "messageId"])),
@@ -726,6 +800,34 @@ fn number(value: &Value, keys: &[&str]) -> Option<u64> {
     })
 }
 
+fn explicit_cost(value: &Value) -> Option<f64> {
+    first_f64(
+        value,
+        &[
+            "costUSD",
+            "cost_usd",
+            "provider_reported_cost",
+            "total_cost_usd",
+        ],
+    )
+}
+
+fn first_f64(value: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|number| {
+            number
+                .as_f64()
+                .or_else(|| number.as_i64().map(|value| value as f64))
+        })
+    })
+}
+
+fn nested_f64(value: &Value, object_key: &str, keys: &[&str]) -> Option<f64> {
+    value
+        .get(object_key)
+        .and_then(|nested| first_f64(nested, keys))
+}
+
 fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
     value.as_object().and_then(|object| {
         keys.iter()
@@ -866,6 +968,7 @@ fn event_hash(
     resource_id: &str,
     offset: u64,
     context: &ParseContext,
+    model_for_hash: Option<&str>,
     raw_usage_json: &Option<Value>,
     snapshot_generation: Option<i64>,
 ) -> String {
@@ -893,7 +996,7 @@ fn event_hash(
         context
             .timestamp
             .map_or_else(String::new, |value| value.to_rfc3339()),
-        context.model.clone().unwrap_or_default(),
+        model_for_hash.unwrap_or_default().to_owned(),
         raw_usage,
         snapshot_generation.map_or_else(String::new, |value| value.to_string()),
     ];
@@ -1065,6 +1168,46 @@ mod tests {
         assert_eq!(batch.usage_events[1].usage.output_tokens_total, Some(10));
         assert_eq!(batch.usage_events[0].query_source.as_deref(), Some("cli"));
         assert_eq!(batch.sessions[0].title.as_deref(), Some("Variant session"));
+    }
+
+    #[test]
+    fn preserves_reported_cost_and_carries_model_to_later_records() {
+        let (home, _) = fixture_home("reported_cost.jsonl");
+        let adapter = ClaudeSessionAdapter::new(home.path());
+        let batch = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("import succeeds");
+
+        assert_eq!(batch.usage_events.len(), 2);
+        assert_eq!(batch.usage_events[0].provider_reported_cost, Some(0.123));
+        assert_eq!(batch.usage_events[0].currency.as_deref(), Some("USD"));
+        assert!(
+            batch
+                .usage_events
+                .iter()
+                .all(|event| event.model.as_deref() == Some("claude-3-7-sonnet"))
+        );
+        assert_eq!(
+            batch.cursors[0].last_model.as_deref(),
+            Some("claude-3-7-sonnet")
+        );
+    }
+
+    #[test]
+    fn backfills_an_earlier_usage_row_when_the_later_record_names_one_model() {
+        let (home, _) = fixture_home("model_after_usage.jsonl");
+        let adapter = ClaudeSessionAdapter::new(home.path());
+        let batch = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("import succeeds");
+
+        assert_eq!(batch.usage_events.len(), 2);
+        assert!(
+            batch
+                .usage_events
+                .iter()
+                .all(|event| event.model.as_deref() == Some("claude-3-7-sonnet"))
+        );
     }
 
     #[test]

@@ -162,6 +162,7 @@ impl OfficialQuotaAdapter {
             last_cumulative_usage: None,
             snapshot_generation: 0,
             last_session_id: None,
+            last_model: None,
             updated_at: now,
         };
 

@@ -8,6 +8,7 @@
 #![warn(missing_docs)]
 
 mod migrations;
+mod pricing;
 
 use std::{collections::HashMap, fmt::Write as FmtWrite, path::Path, time::SystemTime};
 
@@ -561,7 +562,7 @@ impl Database {
             .query_row(
                 "SELECT source_id, resource_id, file_size, modified_at, byte_offset,
                         content_hash, last_cumulative_usage, snapshot_generation,
-                        last_session_id, updated_at
+                        last_session_id, last_model, updated_at
                  FROM import_cursors WHERE source_id = ?1 AND resource_id = ?2",
                 params![source_id, resource_id],
                 cursor_from_row,
@@ -576,7 +577,7 @@ impl Database {
         let mut statement = self.connection.prepare(
             "SELECT source_id, resource_id, file_size, modified_at, byte_offset,
                     content_hash, last_cumulative_usage, snapshot_generation,
-                    last_session_id, updated_at
+                    last_session_id, last_model, updated_at
              FROM import_cursors WHERE source_id = ?1",
         )?;
         let rows = statement.query_map(params![source_id], cursor_from_row)?;
@@ -1733,7 +1734,6 @@ enum InsertOutcome {
 #[derive(Debug)]
 struct StoredCorrelation {
     id: String,
-    raw_event_hash: String,
     ingest_source: tokenbuddy_domain::IngestSource,
     precision_token: PrecisionLevel,
 }
@@ -1747,7 +1747,7 @@ fn correlated_events(conn: &Connection, event: &UsageEvent) -> Result<Vec<Stored
         return Ok(Vec::new());
     };
     let mut statement = conn.prepare(
-        "SELECT id, raw_event_hash, ingest_source, precision_token
+        "SELECT id, ingest_source, precision_token
            FROM usage_events
           WHERE app = ?1
             AND ((?2 IS NOT NULL AND request_id = ?2)
@@ -1760,11 +1760,10 @@ fn correlated_events(conn: &Connection, event: &UsageEvent) -> Result<Vec<Stored
     ])?;
     let mut correlations = Vec::new();
     while let Some(row) = rows.next()? {
-        let ingest_source = ingest_source_from_str(&row.get::<_, String>(2)?)?;
-        let precision_token = precision_from_str(&row.get::<_, String>(3)?)?;
+        let ingest_source = ingest_source_from_str(&row.get::<_, String>(1)?)?;
+        let precision_token = precision_from_str(&row.get::<_, String>(2)?)?;
         correlations.push(StoredCorrelation {
             id: row.get(0)?,
-            raw_event_hash: row.get(1)?,
             ingest_source,
             precision_token,
         });
@@ -1780,13 +1779,85 @@ fn insert_usage_event(
     windowed_account: Option<&str>,
     save_request_metadata: bool,
 ) -> Result<InsertOutcome> {
-    let existing = correlated_events(conn, event)?;
-    if existing
-        .iter()
-        .any(|stored| stored.raw_event_hash == event.raw_event_hash)
-    {
-        return Ok(InsertOutcome::Duplicate);
+    // Precedence: launcher-reported truth > identity the adapter already
+    // resolved > provider guessed from the model name.
+    let provider_id = attributed
+        .map(|value| value.provider_id.clone())
+        .or_else(|| event.provider_id.clone())
+        .or_else(|| derived.map(|derived| derived.id.clone()));
+    let account_id = attributed
+        .and_then(|value| value.account_id.clone())
+        .or_else(|| event.account_id.clone())
+        .or_else(|| windowed_account.map(str::to_owned))
+        .or_else(|| derived.map(|derived| derived.account_id.clone()));
+    // A time-window match is a correlation; say so rather than inheriting the
+    // adapter's precision for an account it never saw.
+    let precision_account = if windowed_account.is_some() {
+        PrecisionLevel::Correlated
+    } else {
+        event.precision_account
+    };
+    let provider_reported_cost = event.provider_reported_cost;
+    let estimated_cost = if provider_reported_cost.is_some() {
+        None
+    } else {
+        event.estimated_cost.or_else(|| {
+            pricing::estimate_cost(provider_id.as_deref(), event.model.as_deref(), &event.usage)
+        })
+    };
+    let currency = event.currency.clone().or_else(|| {
+        (provider_reported_cost.is_some() || estimated_cost.is_some()).then(|| "USD".to_owned())
+    });
+
+    let same_hash_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM usage_events WHERE raw_event_hash = ?1)",
+        params![event.raw_event_hash.as_str()],
+        |row| row.get(0),
+    )?;
+    if same_hash_exists {
+        // A parser upgrade may enrich the same stable row with a model or a
+        // cost that was unavailable during its first import. Reconcile only
+        // missing fields; repeated imports remain idempotent and never replace
+        // a stronger fact with a guess.
+        let changed = conn.execute(
+            "UPDATE usage_events SET
+                 model = COALESCE(model, ?1),
+                 provider_id = COALESCE(provider_id, ?2),
+                 account_id = COALESCE(account_id, ?3),
+                 provider_reported_cost = COALESCE(?4, provider_reported_cost),
+                 estimated_cost = CASE
+                     WHEN ?4 IS NOT NULL THEN NULL
+                     ELSE COALESCE(estimated_cost, ?5)
+                 END,
+                 currency = COALESCE(currency, ?6)
+             WHERE raw_event_hash = ?7
+               AND (
+                   (?1 IS NOT NULL AND model IS NULL)
+                   OR (?2 IS NOT NULL AND provider_id IS NULL)
+                   OR (?3 IS NOT NULL AND account_id IS NULL)
+                   OR (?4 IS NOT NULL AND provider_reported_cost IS NULL)
+                   OR (?4 IS NOT NULL AND estimated_cost IS NOT NULL)
+                   OR (?4 IS NULL AND ?5 IS NOT NULL AND estimated_cost IS NULL
+                       AND provider_reported_cost IS NULL)
+                   OR (?6 IS NOT NULL AND currency IS NULL)
+               )",
+            params![
+                event.model.as_deref(),
+                provider_id.as_deref(),
+                account_id.as_deref(),
+                provider_reported_cost,
+                estimated_cost,
+                currency.as_deref(),
+                event.raw_event_hash.as_str(),
+            ],
+        )?;
+        return Ok(if changed > 0 {
+            InsertOutcome::Reconciled
+        } else {
+            InsertOutcome::Duplicate
+        });
     }
+    let existing = correlated_events(conn, event)?;
     let new_score = (
         event.precision_token.precedence(),
         event.ingest_source.precedence(),
@@ -1828,24 +1899,6 @@ fn insert_usage_event(
     } else {
         None
     };
-    // Precedence: launcher-reported truth > identity the adapter already
-    // resolved > provider guessed from the model name.
-    let provider_id = attributed
-        .map(|value| value.provider_id.clone())
-        .or_else(|| event.provider_id.clone())
-        .or_else(|| derived.map(|derived| derived.id.clone()));
-    let account_id = attributed
-        .and_then(|value| value.account_id.clone())
-        .or_else(|| event.account_id.clone())
-        .or_else(|| windowed_account.map(str::to_owned))
-        .or_else(|| derived.map(|derived| derived.account_id.clone()));
-    // A time-window match is a correlation; say so rather than inheriting the
-    // adapter's precision for an account it never saw.
-    let precision_account = if windowed_account.is_some() {
-        PrecisionLevel::Correlated
-    } else {
-        event.precision_account
-    };
     let changed = conn.execute(
         "INSERT INTO usage_events (
              id, occurred_at, app, launcher, ingest_source, source_id,
@@ -1884,9 +1937,9 @@ fn insert_usage_event(
             option_i64(event.usage.output_tokens_total, "output_tokens_total")?,
             option_i64(event.usage.reasoning_tokens, "reasoning_tokens")?,
             option_i64(event.usage.visible_output_tokens, "visible_output_tokens")?,
-            event.provider_reported_cost,
-            event.estimated_cost,
-            event.currency,
+            provider_reported_cost,
+            estimated_cost,
+            currency,
             event.http_status,
             event.latency_ms,
             event.success.map(bool_to_i64),
@@ -2010,8 +2063,8 @@ fn upsert_cursor(conn: &Connection, cursor: &ImportCursor) -> Result<()> {
         "INSERT INTO import_cursors (
              source_id, resource_id, file_size, modified_at, byte_offset,
              content_hash, last_cumulative_usage, snapshot_generation,
-             last_session_id, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             last_session_id, last_model, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(source_id, resource_id) DO UPDATE SET
              file_size = excluded.file_size,
              modified_at = excluded.modified_at,
@@ -2020,6 +2073,7 @@ fn upsert_cursor(conn: &Connection, cursor: &ImportCursor) -> Result<()> {
              last_cumulative_usage = excluded.last_cumulative_usage,
              snapshot_generation = excluded.snapshot_generation,
              last_session_id = excluded.last_session_id,
+             last_model = excluded.last_model,
              updated_at = excluded.updated_at",
         params![
             cursor.source_id,
@@ -2031,6 +2085,7 @@ fn upsert_cursor(conn: &Connection, cursor: &ImportCursor) -> Result<()> {
             last_cumulative_usage,
             cursor.snapshot_generation,
             cursor.last_session_id,
+            cursor.last_model,
             cursor.updated_at.to_rfc3339(),
         ],
     )?;
@@ -2235,7 +2290,8 @@ fn cursor_from_row(row: &Row<'_>) -> rusqlite::Result<ImportCursor> {
         last_cumulative_usage,
         snapshot_generation: row.get(7)?,
         last_session_id: row.get(8)?,
-        updated_at: parse_datetime("updated_at", row.get(9)?).map_err(to_sql_error)?,
+        last_model: row.get(9)?,
+        updated_at: parse_datetime("updated_at", row.get(10)?).map_err(to_sql_error)?,
     })
 }
 
@@ -2991,6 +3047,7 @@ mod tests {
                 last_cumulative_usage: None,
                 snapshot_generation: 0,
                 last_session_id: None,
+                last_model: None,
                 updated_at: now,
             }],
             skipped_records: 0,
@@ -3023,6 +3080,54 @@ mod tests {
         );
         assert_eq!(quick.session_output_tokens, None);
         assert_eq!(quick.today_total_tokens, None);
+    }
+
+    #[test]
+    fn estimates_known_model_costs_and_reconciles_old_unavailable_rows() {
+        let mut database = Database::open_in_memory().expect("database opens");
+        let mut legacy = event("priced-event", Some(100));
+        legacy.model = None;
+        legacy.usage.input_tokens_uncached = Some(75);
+
+        let first = database
+            .apply_import_batch(&ImportBatch {
+                source: Some(source()),
+                sessions: vec![session()],
+                usage_events: vec![legacy.clone()],
+                ..ImportBatch::default()
+            })
+            .expect("legacy import");
+        assert_eq!(first.inserted_events, 1);
+        assert_eq!(
+            database
+                .list_usage_events(None, 10, 0)
+                .expect("legacy event")
+                .events[0]
+                .estimated_cost,
+            None
+        );
+
+        let mut enriched = legacy;
+        enriched.model = Some("gpt-5-codex".to_owned());
+        let second = database
+            .apply_import_batch(&ImportBatch {
+                usage_events: vec![enriched],
+                ..ImportBatch::default()
+            })
+            .expect("enriched re-import");
+        assert_eq!(second.inserted_events, 0);
+        assert_eq!(second.reconciled_events, 1);
+
+        let event = database
+            .list_usage_events(None, 10, 0)
+            .expect("enriched event")
+            .events
+            .into_iter()
+            .next()
+            .expect("one event");
+        assert_eq!(event.model.as_deref(), Some("gpt-5-codex"));
+        assert!((event.estimated_cost.expect("estimated cost") - 0.000396875).abs() < f64::EPSILON);
+        assert_eq!(event.currency.as_deref(), Some("USD"));
     }
 
     #[test]

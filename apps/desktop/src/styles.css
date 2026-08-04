@@ -357,6 +357,16 @@ h3 {
   font-size: 0.78rem;
 }
 
+/* Chinese section labels are not English all-caps: the shared kicker's wide
+   tracking makes the glyphs look undersized and disconnected. Keep the label
+   compact while giving it the same visual weight as the surrounding section. */
+.source-kicker {
+  font-size: 0.84rem;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  text-transform: none;
+}
+
 .source-description-block {
   flex: 0 1 300px;
   min-width: min(100%, 230px);
@@ -873,6 +883,14 @@ h3 {
   justify-content: space-between;
   gap: 16px;
   padding: 0 20px 16px;
+}
+
+.panel-note {
+  max-width: 520px;
+  margin: 8px 0 0;
+  color: var(--quiet);
+  font-size: 0.68rem;
+  line-height: 1.45;
 }
 
 .detail-heading {

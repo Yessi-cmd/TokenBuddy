@@ -359,7 +359,7 @@ export function DashboardView() {
 
       <section className="source-bar" aria-labelledby="source-heading">
         <div className="source-description-block">
-          <p className="section-kicker" id="source-heading">
+          <p className="section-kicker source-kicker" id="source-heading">
             数据源
           </p>
           <p className="source-description">
@@ -662,6 +662,9 @@ export function DashboardView() {
               Model & provider
             </p>
             <h2>按模型 / 供应商</h2>
+            <p className="panel-note">
+              费用优先使用供应商实报；带 “~” 的数值是按模型价格表估算。
+            </p>
           </div>
         </div>
         {breakdown.length ? (

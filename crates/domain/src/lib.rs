@@ -949,6 +949,10 @@ pub struct ImportCursor {
     /// the header must remember this identity, or every appended usage row is
     /// misattributed to the file-stem fallback and the session splits in two.
     pub last_session_id: Option<String>,
+    /// The model in force at `byte_offset`. Codex rollout usage rows often omit
+    /// the model after the header, so incremental imports must carry the last
+    /// known value across the cursor boundary just like the session identity.
+    pub last_model: Option<String>,
     /// When this cursor was last written.
     pub updated_at: DateTime<Utc>,
 }

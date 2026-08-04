@@ -33,6 +33,16 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "0006_account_activity_windows",
         include_str!("../migrations/0006_account_activity_windows.sql"),
     ),
+    (
+        7,
+        "0007_model_cursor_and_reimport",
+        include_str!("../migrations/0007_model_cursor_and_reimport.sql"),
+    ),
+    (
+        8,
+        "0008_model_context_backfill",
+        include_str!("../migrations/0008_model_context_backfill.sql"),
+    ),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {

@@ -14,7 +14,7 @@
 pub mod account;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::OsStr,
     fs::{self, File},
     io::{self, BufRead, BufReader, Seek, SeekFrom},
@@ -289,6 +289,9 @@ impl CodexSessionAdapter {
             } else {
                 cursor.map_or(0, |value| value.snapshot_generation)
             },
+            current_model: (!cursor_is_stale)
+                .then(|| cursor.and_then(|value| value.last_model.clone()))
+                .flatten(),
         };
         let default_external_session_id = path
             .file_stem()
@@ -306,6 +309,7 @@ impl CodexSessionAdapter {
             )?;
         }
         let mut usage_events = Vec::new();
+        let mut models_by_session = HashMap::<String, BTreeSet<String>>::new();
         let mut quota_snapshots = Vec::new();
         // Rollout logs repeat the same rate-limit numbers on every request until
         // the upstream updates them. Remember the last emitted value per window
@@ -355,6 +359,16 @@ impl CodexSessionAdapter {
                 session_titles,
                 &default_external_session_id,
             );
+            // Codex writes the model in session metadata but often omits it on
+            // later cumulative token rows. Keep the enrichment out of the
+            // event hash so older rows with the same source identity reconcile
+            // instead of being duplicated when this parser learns the model.
+            let model_for_hash = context.model.clone();
+            if let Some(model) = context.model.clone() {
+                state.current_model = Some(model);
+            } else {
+                context.model = state.current_model.clone();
+            }
             if let Some(external_session_id) = &context.session_id {
                 state.current_session_id = Some(external_session_id.clone());
                 update_session(
@@ -366,6 +380,22 @@ impl CodexSessionAdapter {
 
             if context.inherited_history {
                 continue;
+            }
+
+            // Some rollout variants write token_count before the response
+            // record that names the model. Remember explicit candidates so the
+            // earlier usage row can be enriched after the full file is read.
+            if let Some(model) = model_for_hash.as_ref() {
+                let external_session_id = context
+                    .session_id
+                    .clone()
+                    .or_else(|| state.current_session_id.clone())
+                    .unwrap_or_else(|| default_external_session_id.clone());
+                let session_id = self.session_id(&external_session_id);
+                models_by_session
+                    .entry(session_id)
+                    .or_default()
+                    .insert(model.clone());
             }
 
             // Official quota windows ride along on the same `token_count` rows
@@ -441,9 +471,13 @@ impl CodexSessionAdapter {
                 resource_id,
                 line_offset,
                 &context,
+                model_for_hash.as_deref(),
                 &raw_usage_json,
                 candidate.cumulative.then_some(state.snapshot_generation),
             );
+            let provider_reported_cost = context
+                .provider_reported_cost
+                .or_else(|| explicit_cost(&candidate.value));
             usage_events.push(UsageEvent {
                 id: raw_event_hash.clone(),
                 occurred_at: timestamp,
@@ -463,9 +497,9 @@ impl CodexSessionAdapter {
                 model: context.model.clone(),
                 query_source: context.query_source.clone(),
                 usage,
-                provider_reported_cost: None,
+                provider_reported_cost,
                 estimated_cost: None,
-                currency: None,
+                currency: provider_reported_cost.map(|_| "USD".to_owned()),
                 http_status: None,
                 latency_ms: None,
                 success: None,
@@ -482,6 +516,18 @@ impl CodexSessionAdapter {
             });
         }
 
+        for event in &mut usage_events {
+            if event.model.is_none()
+                && let Some(models) = event
+                    .session_id
+                    .as_ref()
+                    .and_then(|session_id| models_by_session.get(session_id))
+                && models.len() == 1
+            {
+                event.model = models.iter().next().cloned();
+            }
+        }
+
         let cursor = ImportCursor {
             source_id: SOURCE_ID.to_owned(),
             resource_id: resource_id.to_owned(),
@@ -492,6 +538,7 @@ impl CodexSessionAdapter {
             last_cumulative_usage: state.last_cumulative_usage,
             snapshot_generation: state.snapshot_generation,
             last_session_id: state.current_session_id,
+            last_model: state.current_model,
             updated_at: now(),
         };
 
@@ -619,6 +666,7 @@ struct ParsedFile {
 #[derive(Debug, Default)]
 struct ParseState {
     current_session_id: Option<String>,
+    current_model: Option<String>,
     last_cumulative_usage: Option<NormalizedUsage>,
     snapshot_generation: i64,
 }
@@ -630,6 +678,7 @@ struct ParseContext {
     project_path: Option<String>,
     title: Option<String>,
     model: Option<String>,
+    provider_reported_cost: Option<f64>,
     request_id: Option<String>,
     response_id: Option<String>,
     query_source: Option<String>,
@@ -707,6 +756,7 @@ fn read_session_index(
             last_cumulative_usage: None,
             snapshot_generation: 0,
             last_session_id: None,
+            last_model: None,
             updated_at: now(),
         },
         changed,
@@ -816,7 +866,27 @@ fn parse_context(value: &Value, default_session_id: &str, state: &ParseState) ->
             &["project_path", "projectPath", "cwd", "working_directory"],
         ),
         title: payload_value_string(value, &["title", "session_title", "sessionTitle"]),
-        model: payload_value_string(value, &["model", "model_name", "modelName"]),
+        model: payload_value_string(
+            value,
+            &[
+                "model",
+                "model_name",
+                "modelName",
+                "model_id",
+                "modelId",
+                "model_slug",
+                "modelSlug",
+            ],
+        ),
+        provider_reported_cost: payload_value_f64(
+            value,
+            &[
+                "cost_usd",
+                "costUSD",
+                "provider_reported_cost",
+                "total_cost_usd",
+            ],
+        ),
         request_id: payload_value_string(value, &["request_id", "requestId"]),
         response_id: payload_value_string(value, &["response_id", "responseId"]),
         query_source: payload_value_string(value, &["query_source", "querySource"]),
@@ -1089,11 +1159,47 @@ fn value_string(value: &Value, keys: &[&str]) -> Option<String> {
 }
 
 fn payload_value_string(value: &Value, keys: &[&str]) -> Option<String> {
-    value_string(value, keys).or_else(|| {
+    value_string(value, keys)
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|payload| payload_value_string(payload, keys))
+        })
+        .or_else(|| {
+            value
+                .get("info")
+                .and_then(|info| payload_value_string(info, keys))
+        })
+}
+
+fn payload_value_f64(value: &Value, keys: &[&str]) -> Option<f64> {
+    value_f64(value, keys).or_else(|| {
         value
             .get("payload")
-            .and_then(|payload| value_string(payload, keys))
+            .and_then(|payload| value_f64(payload, keys))
     })
+}
+
+fn value_f64(value: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        value.get(*key).and_then(|number| {
+            number
+                .as_f64()
+                .or_else(|| number.as_i64().map(|value| value as f64))
+        })
+    })
+}
+
+fn explicit_cost(value: &Value) -> Option<f64> {
+    value_f64(
+        value,
+        &[
+            "cost_usd",
+            "costUSD",
+            "provider_reported_cost",
+            "total_cost_usd",
+        ],
+    )
 }
 
 fn payload_value_bool(value: &Value, keys: &[&str]) -> Option<bool> {
@@ -1152,6 +1258,7 @@ fn event_hash(
     resource_id: &str,
     offset: u64,
     context: &ParseContext,
+    model_for_hash: Option<&str>,
     raw_usage_json: &Option<Value>,
     snapshot_generation: Option<i64>,
 ) -> String {
@@ -1175,7 +1282,7 @@ fn event_hash(
         context
             .timestamp
             .map_or_else(String::new, |value| value.to_rfc3339()),
-        context.model.clone().unwrap_or_default(),
+        model_for_hash.unwrap_or_default().to_owned(),
         raw_usage,
         snapshot_generation.map_or_else(String::new, |value| value.to_string()),
     ];
@@ -1467,6 +1574,38 @@ mod tests {
             .expect("incremental import");
         assert_eq!(third.usage_events.len(), 1);
         assert_eq!(third.usage_events[0].usage.input_tokens_total, Some(20));
+    }
+
+    #[test]
+    fn carries_model_from_session_metadata_to_usage_rows() {
+        let home = fixture_home("model_inherited_usage.jsonl");
+        let adapter = CodexSessionAdapter::new(home.path());
+        let batch = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("import");
+
+        assert_eq!(batch.usage_events.len(), 2);
+        assert!(
+            batch
+                .usage_events
+                .iter()
+                .all(|event| event.model.as_deref() == Some("gpt-5-codex"))
+        );
+        assert_eq!(batch.usage_events[1].usage.input_tokens_total, Some(40));
+        assert_eq!(batch.usage_events[1].usage.cache_read_tokens, Some(15));
+        assert_eq!(batch.cursors[0].last_model.as_deref(), Some("gpt-5-codex"));
+    }
+
+    #[test]
+    fn backfills_an_earlier_usage_row_when_the_response_names_one_model() {
+        let home = fixture_home("model_after_usage.jsonl");
+        let adapter = CodexSessionAdapter::new(home.path());
+        let batch = adapter
+            .import_history_sync(&HashMap::new())
+            .expect("import");
+
+        assert_eq!(batch.usage_events.len(), 1);
+        assert_eq!(batch.usage_events[0].model.as_deref(), Some("gpt-5-codex"));
     }
 
     #[test]

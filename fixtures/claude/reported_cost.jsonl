@@ -1,0 +1,2 @@
+{"type":"assistant","sessionId":"reported-cost-session","timestamp":"2026-08-01T11:00:00Z","message":{"id":"reported-message-001","model":"claude-3-7-sonnet","usage":{"input_tokens":100,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":40},"content":"REDACTED"},"costUSD":0.123}
+{"type":"assistant","sessionId":"reported-cost-session","timestamp":"2026-08-01T11:00:01Z","message":{"id":"reported-message-002","usage":{"input_tokens":120,"cache_creation_input_tokens":10,"cache_read_input_tokens":40,"output_tokens":50},"content":"REDACTED"}}
