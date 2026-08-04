@@ -983,8 +983,8 @@ impl Database {
     /// Build the tray summary.
     ///
     /// Deliberately narrow: the newest event, its session's totals, today's
-    /// total, and that account's newest quota window. Everything the popover
-    /// shows comes from here, so it never runs a broad aggregation.
+    /// total, and the most relevant official quota window. Everything the
+    /// popover shows comes from here, so it never runs a broad aggregation.
     pub fn quick_summary(
         &self,
         now: DateTime<Utc>,
@@ -1027,12 +1027,21 @@ impl Database {
             .and_then(|(_, session_id, _, _, _, _, _)| session_id.as_deref())
             .map(|session_id| self.session_usage_totals(session_id))
             .transpose()?;
-        let quota_summary = active
+        let active_quota_summary = active
             .as_ref()
             .and_then(|(_, _, _, _, _, _, account_id)| account_id.as_deref())
             .map(|account_id| self.latest_quota_summary(account_id))
             .transpose()?
             .flatten();
+        // The newest session can belong to a locally inferred account (or to
+        // another provider) even while the official ChatGPT account has a
+        // fresh quota reading. Keep the active account when it has a match;
+        // otherwise surface the newest ChatGPT quota so the tray remains a
+        // useful official-quota view outside Cockpit.
+        let quota_summary = match active_quota_summary {
+            Some(quota) => Some(quota),
+            None => self.latest_official_quota_summary()?,
+        };
 
         Ok(QuickSummary {
             collection_status,
@@ -1086,6 +1095,43 @@ impl Database {
                           END,
                           id DESC LIMIT 1",
                 params![account_id],
+                |row| {
+                    Ok(QuotaSummary {
+                        window_type: row.get(0)?,
+                        used_percent: row.get(1)?,
+                        remaining_percent: row.get(2)?,
+                        reset_at: row
+                            .get::<_, Option<String>>(3)?
+                            .map(|value| parse_datetime("reset_at", value))
+                            .transpose()
+                            .map_err(to_sql_error)?,
+                        credits_remaining: row.get(4)?,
+                        precision: precision_from_str(&row.get::<_, String>(5)?)
+                            .map_err(to_sql_error)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn latest_official_quota_summary(&self) -> Result<Option<QuotaSummary>> {
+        self.connection
+            .query_row(
+                "SELECT q.window_type, q.used_percent, q.remaining_percent, q.reset_at,
+                        q.credits_remaining, q.precision
+                 FROM quota_snapshots q
+                 INNER JOIN accounts a ON a.id = q.account_id
+                 WHERE a.auth_mode = 'chatgpt'
+                 ORDER BY q.captured_at DESC,
+                          CASE
+                              WHEN q.window_type LIKE 'primary%' THEN 0
+                              WHEN q.window_type LIKE 'secondary%' THEN 1
+                              WHEN q.window_type = 'credits' THEN 3
+                              ELSE 2
+                          END,
+                          q.id DESC LIMIT 1",
+                [],
                 |row| {
                     Ok(QuotaSummary {
                         window_type: row.get(0)?,
@@ -2502,6 +2548,17 @@ mod tests {
         }
     }
 
+    fn inferred_account() -> AccountRecord {
+        AccountRecord {
+            id: "openai:local".to_owned(),
+            provider_id: "openai".to_owned(),
+            display_name: Some("本地会话".to_owned()),
+            account_fingerprint: "local-session-account".to_owned(),
+            auth_mode: "session_log".to_owned(),
+            plan: None,
+        }
+    }
+
     fn quota(id: &str, used_percent: f64, captured_at: DateTime<Utc>) -> QuotaSnapshot {
         QuotaSnapshot {
             id: id.to_owned(),
@@ -2588,6 +2645,35 @@ mod tests {
         let quota_summary = summary.quota_summary.expect("tray quota summary");
         assert_eq!(quota_summary.used_percent, Some(18.75));
         assert_eq!(quota_summary.window_type, "primary_5h");
+        assert_eq!(quota_summary.precision, PrecisionLevel::Correlated);
+    }
+
+    #[test]
+    fn quick_summary_falls_back_to_the_newest_official_quota() {
+        let mut database = Database::open_in_memory().expect("database opens");
+        let captured_at = Utc::now();
+        let mut active_event = event("local-session-event", Some(40));
+        active_event.account_id = Some(inferred_account().id);
+
+        database
+            .apply_import_batch(&ImportBatch {
+                source: Some(source()),
+                accounts: vec![official_account(), inferred_account()],
+                sessions: vec![session()],
+                usage_events: vec![active_event],
+                quota_snapshots: vec![quota("official-quota", 8.0, captured_at)],
+                ..ImportBatch::default()
+            })
+            .expect("import local session and official quota");
+
+        let summary = database
+            .quick_summary(Utc::now(), CollectionStatus::Collecting, None)
+            .expect("quick summary");
+        let quota_summary = summary
+            .quota_summary
+            .expect("official quota should be visible in the tray");
+        assert_eq!(quota_summary.used_percent, Some(8.0));
+        assert_eq!(quota_summary.remaining_percent, Some(92.0));
         assert_eq!(quota_summary.precision, PrecisionLevel::Correlated);
     }
 

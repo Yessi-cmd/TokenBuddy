@@ -5,6 +5,7 @@ import {
   getQuickSummary,
   isDesktopRuntime,
   openLocalWebApi,
+  refreshOfficialQuota,
   showMainWindow,
   type QuickSummary,
 } from "../../lib/api";
@@ -17,6 +18,7 @@ import {
 import {
   collectionStatusLabel,
   describeError,
+  formatDate,
   formatPercent,
   formatTokens,
 } from "../../lib/format";
@@ -24,6 +26,7 @@ import {
 export function QuickSummaryView() {
   const [summary, setSummary] = useState<QuickSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isRefreshingQuota, setIsRefreshingQuota] = useState(false);
   const shellRef = useRef<HTMLDivElement | null>(null);
 
   // Keep the popover window exactly as tall as what is rendered. The window is
@@ -74,6 +77,21 @@ export function QuickSummaryView() {
       document.body.classList.remove("quick-window");
     };
   }, []);
+
+  async function handleQuotaRefresh() {
+    setIsRefreshingQuota(true);
+    try {
+      await refreshOfficialQuota();
+      const nextSummary = await getQuickSummary();
+      setSummary(nextSummary);
+      setError(null);
+    } catch (cause) {
+      console.error("刷新官方额度失败", cause);
+      setError(describeError(cause));
+    } finally {
+      setIsRefreshingQuota(false);
+    }
+  }
 
   const quota = summary?.quota_summary;
   const status = summary?.collection_status ?? "starting";
@@ -156,10 +174,28 @@ export function QuickSummaryView() {
           }
           sublabel={
             quota
-              ? `${quota.window_type} · ${quota.precision}`
+              ? quota.window_type === "credits"
+                ? `额度余额 ${quota.credits_remaining == null ? "Unavailable" : quota.credits_remaining} · ${quota.precision}`
+                : `${quota.window_type} · 剩余 ${formatPercent(quota.remaining_percent)} · ${quota.precision}`
               : "未接入额度 API"
           }
+          trailing={
+            <button
+              className="menu-inline-action"
+              type="button"
+              aria-label="刷新官方额度"
+              onClick={() => void handleQuotaRefresh()}
+              disabled={isRefreshingQuota}
+            >
+              {isRefreshingQuota ? "刷新中…" : "刷新"}
+            </button>
+          }
         />
+        {quota?.reset_at ? (
+          <p className="menu-caption menu-quota-reset">
+            重置：{formatDate(quota.reset_at)}
+          </p>
+        ) : null}
 
         {summary?.latest_warning ? (
           <div className="menu-note menu-note-warning">

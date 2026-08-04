@@ -290,9 +290,13 @@ describe("App", () => {
     });
     expect(screen.getByText("OpenAI · ChatGPT 官方登录")).toBeInTheDocument();
     expect(screen.getByText("pro")).toBeInTheDocument();
-    // The window is shown at the precision it was recorded with, never as
-    // Verified, and the fingerprint is truncated.
-    expect(screen.getByText("primary_5h 18.8% 已用")).toBeInTheDocument();
+    // Usage, remaining, reset, and precision are visible in the account card;
+    // the precision is never upgraded to Verified, and the fingerprint stays
+    // truncated.
+    expect(screen.getByText(/窗口 · primary_5h/)).toBeInTheDocument();
+    expect(screen.getByText("18.8%")).toBeInTheDocument();
+    expect(screen.getByText("81.3%")).toBeInTheDocument();
+    expect(screen.getByText("重置", { selector: "span" })).toBeInTheDocument();
     expect(screen.getByText("Correlated")).toBeInTheDocument();
     expect(screen.getByText("指纹 fixture00000")).toBeInTheDocument();
   });
@@ -723,7 +727,7 @@ describe("App panels", () => {
     await waitFor(() => {
       expect(screen.getByText("primary_5h")).toBeInTheDocument();
     });
-    expect(screen.getByText("12.5% 已用")).toBeInTheDocument();
+    expect(screen.getByText("12.5%")).toBeInTheDocument();
     expect(screen.getByText(/Correlated/)).toBeInTheDocument();
   });
 
@@ -827,6 +831,12 @@ describe("Quick summary panel", () => {
     });
     expect(screen.getByText(/primary_5h/)).toBeInTheDocument();
     expect(screen.getByText(/18\.8%|18\.75%/)).toBeInTheDocument();
+    expect(screen.getByText(/剩余 81\.3%/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新官方额度" }));
+    await waitFor(() => {
+      expect(refreshOfficialQuota).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("states what is unknown instead of showing zeros", async () => {

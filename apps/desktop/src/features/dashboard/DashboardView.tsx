@@ -652,7 +652,10 @@ export function DashboardView() {
         <MetricCard label="费用" value={formatCost(totals)} tone="ink" />
       </section>
 
-      <section className="panel" aria-labelledby="breakdown-heading">
+      <section
+        className="panel breakdown-panel"
+        aria-labelledby="breakdown-heading"
+      >
         <div className="panel-heading">
           <div>
             <p className="section-kicker" id="breakdown-heading">
