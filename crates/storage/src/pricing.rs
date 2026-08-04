@@ -10,8 +10,21 @@ use tokenbuddy_domain::NormalizedUsage;
 struct PriceRule {
     input: f64,
     cache_read: Option<f64>,
-    cache_write: Option<f64>,
+    cache_write: CacheWriteRule,
     output: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CacheWriteRule {
+    /// The provider does not expose a separately billable cache-write term
+    /// for the usage shape represented by this source.
+    None,
+    /// The estimate is only valid when the source reports cache-write tokens.
+    Required(f64),
+    /// The provider publishes a cache-write price, but this source may omit
+    /// the write count. Add it when reported without turning an absent count
+    /// into zero.
+    IfReported(f64),
 }
 
 /// Calculate an API-equivalent estimate when every billable component required
@@ -30,8 +43,16 @@ pub(super) fn estimate_cost(
     if let Some(price) = rule.cache_read {
         cost = cost.checked_add(per_million(usage.cache_read_tokens?, price))?;
     }
-    if let Some(price) = rule.cache_write {
-        cost = cost.checked_add(per_million(usage.cache_write_tokens?, price))?;
+    match rule.cache_write {
+        CacheWriteRule::None => {}
+        CacheWriteRule::Required(price) => {
+            cost = cost.checked_add(per_million(usage.cache_write_tokens?, price))?;
+        }
+        CacheWriteRule::IfReported(price) => {
+            if let Some(tokens) = usage.cache_write_tokens {
+                cost = cost.checked_add(per_million(tokens, price))?;
+            }
+        }
     }
     cost.is_finite().then_some(cost)
 }
@@ -48,8 +69,52 @@ fn price_rule(provider_id: &str, model: &str) -> Option<PriceRule> {
         "openai" if model == "gpt-5-codex" => Some(PriceRule {
             input: 1.25,
             cache_read: Some(0.125),
-            cache_write: None,
+            cache_write: CacheWriteRule::None,
             output: 10.0,
+        }),
+        // OpenAI's current GPT-5.6 model pages:
+        // (https://developers.openai.com/api/docs/models/gpt-5.6-sol),
+        // (https://developers.openai.com/api/docs/models/gpt-5.6-terra), and
+        // (https://developers.openai.com/api/docs/models/gpt-5.6-luna). The
+        // pages list input/cached-input/output as Sol $5/$0.50/$30, Terra
+        // $2/$0.20/$12, and Luna $0.20/$0.02/$1.20 per million. Cache writes
+        // are 1.25x uncached input. Codex session usage does not consistently
+        // expose a separate write count, so include it only when reported.
+        "openai" if model == "gpt-5.6" || is_model_variant(&model, "gpt-5.6-sol") => {
+            Some(PriceRule {
+                input: 5.0,
+                cache_read: Some(0.50),
+                cache_write: CacheWriteRule::IfReported(6.25),
+                output: 30.0,
+            })
+        }
+        "openai" if is_model_variant(&model, "gpt-5.6-terra") => Some(PriceRule {
+            input: 2.0,
+            cache_read: Some(0.20),
+            cache_write: CacheWriteRule::IfReported(2.50),
+            output: 12.0,
+        }),
+        "openai" if is_model_variant(&model, "gpt-5.6-luna") => Some(PriceRule {
+            input: 0.20,
+            cache_read: Some(0.02),
+            cache_write: CacheWriteRule::IfReported(0.25),
+            output: 1.20,
+        }),
+        // Anthropic's current Claude Opus 5 and Fable 5 cards
+        // (https://platform.claude.com/docs/en/about-claude/pricing): Opus 5
+        // is $5 input, $6.25 five-minute cache write, $0.50 cache hit, and
+        // $25 output; Fable 5 is $10, $12.50, $1, and $50 per million.
+        "anthropic" if is_model_variant(&model, "claude-opus-5") => Some(PriceRule {
+            input: 5.0,
+            cache_read: Some(0.50),
+            cache_write: CacheWriteRule::Required(6.25),
+            output: 25.0,
+        }),
+        "anthropic" if is_model_variant(&model, "claude-fable-5") => Some(PriceRule {
+            input: 10.0,
+            cache_read: Some(1.0),
+            cache_write: CacheWriteRule::Required(12.50),
+            output: 50.0,
         }),
         // Anthropic's standard Claude 3.7 Sonnet card
         // (https://docs.anthropic.com/en/docs/about-claude/pricing): $3 input,
@@ -58,11 +123,15 @@ fn price_rule(provider_id: &str, model: &str) -> Option<PriceRule> {
         "anthropic" if model.starts_with("claude-3-7-sonnet") => Some(PriceRule {
             input: 3.0,
             cache_read: Some(0.30),
-            cache_write: Some(3.75),
+            cache_write: CacheWriteRule::Required(3.75),
             output: 15.0,
         }),
         _ => None,
     }
+}
+
+fn is_model_variant(model: &str, family: &str) -> bool {
+    model == family || model.starts_with(&format!("{family}-"))
 }
 
 fn per_million(tokens: u64, price: f64) -> f64 {
@@ -100,6 +169,34 @@ mod tests {
     }
 
     #[test]
+    fn prices_each_gpt_5_6_tier_and_optional_cache_writes() {
+        let usage = NormalizedUsage {
+            input_tokens_uncached: Some(80),
+            cache_read_tokens: Some(20),
+            output_tokens_total: Some(40),
+            ..Default::default()
+        };
+        let cases = [
+            ("gpt-5.6", 0.00161),
+            ("gpt-5.6-sol", 0.00161),
+            ("gpt-5.6-terra", 0.000644),
+            ("gpt-5.6-luna", 0.0000644),
+        ];
+        for (model, expected) in cases {
+            let cost = estimate_cost(Some("openai"), Some(model), &usage).expect("known price");
+            assert!((cost - expected).abs() < f64::EPSILON, "{model}: {cost}");
+        }
+
+        let with_cache_write = NormalizedUsage {
+            cache_write_tokens: Some(10),
+            ..usage
+        };
+        let cost = estimate_cost(Some("openai"), Some("gpt-5.6-sol"), &with_cache_write)
+            .expect("known price");
+        assert!((cost - 0.0016725).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn prices_anthropic_cache_writes_without_treating_missing_fields_as_zero() {
         let usage = NormalizedUsage {
             input_tokens_uncached: Some(100),
@@ -124,6 +221,23 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn prices_current_claude_opus_and_fable_cards() {
+        let usage = NormalizedUsage {
+            input_tokens_uncached: Some(100),
+            cache_read_tokens: Some(30),
+            cache_write_tokens: Some(20),
+            output_tokens_total: Some(40),
+            ..Default::default()
+        };
+        let opus = estimate_cost(Some("anthropic"), Some("claude-opus-5"), &usage)
+            .expect("known Opus price");
+        assert!((opus - 0.00164).abs() < f64::EPSILON);
+        let fable = estimate_cost(Some("anthropic"), Some("claude-fable-5"), &usage)
+            .expect("known Fable price");
+        assert!((fable - 0.00328).abs() < f64::EPSILON);
     }
 
     #[test]

@@ -163,7 +163,9 @@ impl Database {
         let mut connection = Connection::open(path)?;
         configure_connection(&connection)?;
         migrations::run(&mut connection)?;
-        Ok(Self { connection })
+        let mut database = Self { connection };
+        database.refresh_estimated_costs()?;
+        Ok(database)
     }
 
     /// A migrated in-memory database, for tests.
@@ -171,12 +173,18 @@ impl Database {
         let mut connection = Connection::open_in_memory()?;
         configure_connection(&connection)?;
         migrations::run(&mut connection)?;
-        Ok(Self { connection })
+        let mut database = Self { connection };
+        database.refresh_estimated_costs()?;
+        Ok(database)
     }
 
     /// The underlying connection, for tests that need to assert on raw rows.
     pub fn connection(&self) -> &Connection {
         &self.connection
+    }
+
+    fn refresh_estimated_costs(&mut self) -> Result<()> {
+        refresh_estimated_costs_in_connection(&mut self.connection)
     }
 
     /// Apply one adapter batch in a single transaction.
@@ -1963,6 +1971,61 @@ fn insert_usage_event(
     })
 }
 
+/// Recalculate API-equivalent estimates for rows that were imported before a
+/// newly supported model price card existed. Provider-reported costs remain
+/// authoritative and are never overwritten.
+fn refresh_estimated_costs_in_connection(conn: &mut Connection) -> Result<()> {
+    let candidates = {
+        let mut statement = conn.prepare(
+            "SELECT id, provider_id, model, input_tokens_uncached, cache_read_tokens,
+                    cache_write_tokens, output_tokens_total
+             FROM usage_events
+             WHERE provider_reported_cost IS NULL AND model IS NOT NULL",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let usage = NormalizedUsage {
+                input_tokens_uncached: option_u64(row.get(3)?, "input_tokens_uncached")
+                    .map_err(to_sql_error)?,
+                cache_read_tokens: option_u64(row.get(4)?, "cache_read_tokens")
+                    .map_err(to_sql_error)?,
+                cache_write_tokens: option_u64(row.get(5)?, "cache_write_tokens")
+                    .map_err(to_sql_error)?,
+                output_tokens_total: option_u64(row.get(6)?, "output_tokens_total")
+                    .map_err(to_sql_error)?,
+                ..Default::default()
+            };
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                usage,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    let transaction = conn.transaction()?;
+    for (id, provider_id, model, usage) in candidates {
+        let Some(cost) = pricing::estimate_cost(provider_id.as_deref(), model.as_deref(), &usage)
+        else {
+            continue;
+        };
+        transaction.execute(
+            "UPDATE usage_events
+             SET estimated_cost = ?1,
+                 currency = COALESCE(currency, 'USD')
+             WHERE id = ?2 AND provider_reported_cost IS NULL",
+            params![cost, id],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 /// A provider (and grouping account) inferred from a session-log event's model
 /// and app. Session logs do not name a provider, but the model prefix reliably
 /// identifies one, which is enough to populate the Providers view honestly.
@@ -3128,6 +3191,45 @@ mod tests {
         assert_eq!(event.model.as_deref(), Some("gpt-5-codex"));
         assert!((event.estimated_cost.expect("estimated cost") - 0.000396875).abs() < f64::EPSILON);
         assert_eq!(event.currency.as_deref(), Some("USD"));
+    }
+
+    #[test]
+    fn refreshes_existing_rows_when_a_new_model_price_card_is_added() {
+        let mut database = Database::open_in_memory().expect("database opens");
+        let mut event = event("gpt-56-sol-existing", Some(100));
+        event.provider_id = Some("openai".to_owned());
+        event.model = Some("gpt-5.6-sol".to_owned());
+        event.usage.input_tokens_uncached = Some(75);
+
+        database
+            .apply_import_batch(&ImportBatch {
+                source: Some(source()),
+                sessions: vec![session()],
+                usage_events: vec![event],
+                ..ImportBatch::default()
+            })
+            .expect("known model import");
+        database
+            .connection()
+            .execute(
+                "UPDATE usage_events SET estimated_cost = NULL, currency = NULL
+                 WHERE id = 'gpt-56-sol-existing'",
+                [],
+            )
+            .expect("simulate a legacy unavailable estimate");
+
+        database
+            .refresh_estimated_costs()
+            .expect("refresh estimates");
+        let stored = database
+            .list_usage_events(None, 10, 0)
+            .expect("refreshed event")
+            .events
+            .into_iter()
+            .next()
+            .expect("one event");
+        assert!((stored.estimated_cost.expect("estimated cost") - 0.0012875).abs() < f64::EPSILON);
+        assert_eq!(stored.currency.as_deref(), Some("USD"));
     }
 
     #[test]
