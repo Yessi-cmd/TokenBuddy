@@ -19,6 +19,7 @@ import {
   listSources,
   openLocalWebApi,
   pickDirectory,
+  refreshOfficialQuota,
   rescanCcSwitch,
   rescanClaude,
   rescanCockpit,
@@ -48,6 +49,7 @@ vi.mock("./lib/api", () => ({
   openLocalWebApi: vi.fn(),
   pickDirectory: vi.fn(),
   pickFile: vi.fn(),
+  refreshOfficialQuota: vi.fn(),
   rescanClaude: vi.fn(),
   rescanCodex: vi.fn(),
   rescanCcSwitch: vi.fn(),
@@ -723,6 +725,30 @@ describe("App panels", () => {
     });
     expect(screen.getByText("12.5% 已用")).toBeInTheDocument();
     expect(screen.getByText(/Correlated/)).toBeInTheDocument();
+  });
+
+  it("refreshes official quota through the shared Core boundary", async () => {
+    vi.mocked(refreshOfficialQuota).mockResolvedValue({
+      inserted_events: 0,
+      duplicate_events: 0,
+      reconciled_events: 0,
+      upserted_sessions: 0,
+      updated_cursors: 1,
+      upserted_accounts: 1,
+      inserted_quota_snapshots: 1,
+      skipped_records: 0,
+      warning: null,
+    });
+    window.history.pushState({}, "", "/quotas");
+    render(<App />);
+
+    const refresh = await screen.findByRole("button", {
+      name: "刷新官方额度",
+    });
+    fireEvent.click(refresh);
+    await waitFor(() => {
+      expect(refreshOfficialQuota).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("keeps unavailable dashboard values out of the totals", async () => {

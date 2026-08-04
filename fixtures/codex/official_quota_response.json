@@ -1,0 +1,48 @@
+{
+  "plan_type": "plus",
+  "rate_limit": {
+    "allowed": true,
+    "limit_reached": false,
+    "primary_window": {
+      "used_percent": 24,
+      "limit_window_seconds": 18000,
+      "reset_after_seconds": 7200,
+      "reset_at": 1790007200
+    },
+    "secondary_window": {
+      "limit_window_seconds": 604800,
+      "reset_after_seconds": 259200
+    }
+  },
+  "credits": {
+    "has_credits": true,
+    "unlimited": false,
+    "balance": "12.50"
+  },
+  "spend_control": {
+    "reached": false,
+    "individual_limit": {
+      "limit": "25000",
+      "used": "8000",
+      "remaining_percent": 68,
+      "reset_at": 1790010800
+    }
+  },
+  "additional_rate_limits": [
+    {
+      "metered_feature": "code_review",
+      "limit_name": "Code review",
+      "rate_limit": {
+        "primary_window": {
+          "used_percent": 10,
+          "limit_window_seconds": 604800,
+          "reset_at": 1790028800
+        }
+      }
+    }
+  ],
+  "rate_limit_reached_type": null,
+  "rate_limit_reset_credits": {
+    "available_count": 1
+  }
+}

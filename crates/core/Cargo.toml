@@ -13,6 +13,7 @@ tokenbuddy-codex-session = { path = "../adapters/codex-session" }
 tokenbuddy-claude-session = { path = "../adapters/claude-session" }
 tokenbuddy-cc-switch = { path = "../adapters/cc-switch" }
 tokenbuddy-cockpit = { path = "../adapters/cockpit" }
+tokenbuddy-official-quota = { path = "../adapters/official-quota" }
 tokenbuddy-domain.workspace = true
 tokenbuddy-storage.workspace = true
 tokenbuddy-otel-receiver = { path = "../otel-receiver" }

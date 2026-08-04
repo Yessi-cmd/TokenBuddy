@@ -174,6 +174,8 @@ export interface RescanResult {
   reconciled_events?: number;
   upserted_sessions: number;
   updated_cursors: number;
+  upserted_accounts?: number;
+  inserted_quota_snapshots?: number;
   skipped_records: number;
   warning: string | null;
 }
@@ -426,6 +428,27 @@ export function listQuotaSnapshots(
     "list_quota_snapshots",
     `/api/quotas${queryString({ account_id: accountId, limit })}`,
     { accountId, limit },
+  );
+}
+
+export function refreshOfficialQuota(): Promise<RescanResult> {
+  return request<RescanResult>(
+    "refresh_official_quota",
+    "/api/refresh-official-quota",
+    undefined,
+    inTauri()
+      ? undefined
+      : {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        },
+  );
+}
+
+export function detectOfficialQuotaPath(): Promise<DetectionResult> {
+  return request<DetectionResult>(
+    "detect_official_quota_path",
+    "/api/detect-official-quota",
   );
 }
 

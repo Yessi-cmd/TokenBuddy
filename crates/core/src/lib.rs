@@ -36,6 +36,11 @@ use tokenbuddy_domain::{
     ExportResult, ImportBatch, QuickSummary, SessionDetail, SessionPage, SourceRecord,
     UsageAdapter, UsageEventPage, UsageFilters,
 };
+use tokenbuddy_official_quota::{
+    CURSOR_RESOURCE_ID as OFFICIAL_QUOTA_CURSOR_RESOURCE_ID,
+    DEFAULT_BASE_URL as OFFICIAL_QUOTA_DEFAULT_BASE_URL, DESCRIPTOR as OFFICIAL_QUOTA_DESCRIPTOR,
+    OfficialQuotaAdapter, SOURCE_ID as OFFICIAL_QUOTA_SOURCE_ID,
+};
 use tokenbuddy_otel_receiver::{
     BatchSink as OtelBatchSink, DESCRIPTOR as OTEL_DESCRIPTOR, OtelReceiver,
 };
@@ -51,6 +56,7 @@ type SummaryListener = Arc<dyn Fn(QuickSummary) + Send + Sync>;
 /// source is installed; runtime detection remains in `SourceRecord`.
 pub const ADAPTER_DESCRIPTORS: &[AdapterDescriptor] = &[
     CODEX_DESCRIPTOR,
+    OFFICIAL_QUOTA_DESCRIPTOR,
     CLAUDE_DESCRIPTOR,
     CC_SWITCH_DESCRIPTOR,
     COCKPIT_DESCRIPTOR,
@@ -74,6 +80,14 @@ pub struct CoreConfig {
     pub cc_switch_db: Option<PathBuf>,
     /// Cockpit database to use when the settings have none.
     pub cockpit_db: Option<PathBuf>,
+    /// Whether to query the first-party ChatGPT/Codex quota endpoint. The
+    /// desktop application enables this; callers can disable it when running
+    /// offline or in a fixture-only environment.
+    pub official_quota_enabled: bool,
+    /// Optional override for the official quota endpoint base URL. This is
+    /// primarily useful for controlled integration tests; production uses the
+    /// first-party ChatGPT backend.
+    pub official_quota_base_url: Option<String>,
     /// How often to import when no filesystem event arrives. This is the safety
     /// net for filesystems that do not deliver notifications, not the primary
     /// path.
@@ -92,6 +106,8 @@ impl CoreConfig {
             claude_home: None,
             cc_switch_db: None,
             cockpit_db: None,
+            official_quota_enabled: false,
+            official_quota_base_url: None,
             // Native file notifications are the normal wake-up path. Keep a
             // deliberately infrequent poll as a safety net for filesystems
             // that drop or do not support notifications.
@@ -115,6 +131,18 @@ impl CoreConfig {
     /// Set the fallback Cockpit database path.
     pub fn with_cockpit_db(mut self, cockpit_db: Option<PathBuf>) -> Self {
         self.cockpit_db = cockpit_db;
+        self
+    }
+
+    /// Enable or disable direct official quota refreshes.
+    pub fn with_official_quota_enabled(mut self, enabled: bool) -> Self {
+        self.official_quota_enabled = enabled;
+        self
+    }
+
+    /// Override the official quota endpoint base URL.
+    pub fn with_official_quota_base_url(mut self, base_url: Option<String>) -> Self {
+        self.official_quota_base_url = base_url;
         self
     }
 }
@@ -242,6 +270,8 @@ pub struct Core {
     claude_home: RwLock<Option<PathBuf>>,
     cc_switch_db: RwLock<Option<PathBuf>>,
     cockpit_db: RwLock<Option<PathBuf>>,
+    official_quota_enabled: bool,
+    official_quota_base_url: Option<String>,
     summary: RwLock<QuickSummary>,
     summary_listeners: Mutex<Vec<SummaryListener>>,
     control: Arc<CoreControl>,
@@ -310,6 +340,8 @@ impl Core {
             claude_home: RwLock::new(claude_home),
             cc_switch_db: RwLock::new(cc_switch_db),
             cockpit_db: RwLock::new(cockpit_db),
+            official_quota_enabled: config.official_quota_enabled,
+            official_quota_base_url: config.official_quota_base_url,
             summary: RwLock::new(QuickSummary::starting()),
             summary_listeners: Mutex::new(Vec::new()),
             control: Arc::clone(&control),
@@ -413,6 +445,14 @@ impl Core {
         if let Some(codex_home) = codex_home {
             self.set_codex_home(Some(codex_home))?;
         }
+        self.refresh_once()
+    }
+
+    /// Refresh the official quota API and the other sources using their
+    /// existing cursors. The official source itself never requires Cockpit or
+    /// CC-Switch; rerunning the shared pass keeps status and warnings coherent
+    /// across the whole Core.
+    pub fn refresh_official_quota(&self) -> Result<ImportReport, CoreError> {
         self.refresh_once()
     }
 
@@ -653,6 +693,22 @@ impl Core {
             .map_err(|error| CoreError::Adapter(error.to_string()))
     }
 
+    /// Whether the configured Codex home contains the OAuth material required
+    /// by the direct official quota reader.
+    pub fn detect_official_quota_path(&self) -> Result<DetectionResult, CoreError> {
+        let Some(home) = self.codex_home()? else {
+            return Ok(DetectionResult {
+                source_id: OFFICIAL_QUOTA_SOURCE_ID.to_owned(),
+                detected: false,
+                path_or_endpoint: Some(OFFICIAL_QUOTA_DEFAULT_BASE_URL.to_owned()),
+                detected_version: None,
+                message: Some("未配置 Codex Home；官方额度保持 Unavailable".to_owned()),
+            });
+        };
+        let adapter = self.official_quota_adapter(home)?;
+        Ok(adapter.detect_sync())
+    }
+
     /// Whether the configured Claude home holds a projects directory.
     pub fn detect_claude_path(&self) -> Result<DetectionResult, CoreError> {
         let Some(home) = self.claude_home()? else {
@@ -882,7 +938,12 @@ impl Core {
         }
 
         match self.codex_home()? {
-            Some(home) => self.import_codex(home, &mut state)?,
+            Some(home) => {
+                self.import_codex(home.clone(), &mut state)?;
+                if self.official_quota_enabled {
+                    self.import_official_quota(home, &mut state)?;
+                }
+            }
             None => state
                 .warnings
                 .push("未配置 Codex Home；Codex 数据源保持 Unavailable".to_owned()),
@@ -957,6 +1018,45 @@ impl Core {
                 state.has_error = true;
                 state.warnings.push(message.clone());
                 self.record_source_error(CODEX_DESCRIPTOR, codex_home, message)
+            }
+        }
+    }
+
+    fn official_quota_adapter(
+        &self,
+        codex_home: PathBuf,
+    ) -> Result<OfficialQuotaAdapter, CoreError> {
+        let salt = self.database_lock()?.local_salt()?;
+        let adapter = OfficialQuotaAdapter::new(codex_home, salt)
+            .map_err(|error| CoreError::Adapter(error.to_string()))?;
+        Ok(match &self.official_quota_base_url {
+            Some(base_url) => adapter.with_base_url(base_url.clone()),
+            None => adapter,
+        })
+    }
+
+    fn import_official_quota(
+        &self,
+        codex_home: PathBuf,
+        state: &mut RefreshState,
+    ) -> Result<(), CoreError> {
+        let adapter = self.official_quota_adapter(codex_home)?;
+        let endpoint = adapter.endpoint_url();
+        let cursors = self
+            .database_lock()?
+            .list_import_cursors(OFFICIAL_QUOTA_SOURCE_ID)?;
+        let cursor = cursors
+            .values()
+            .find(|cursor| cursor.resource_id == OFFICIAL_QUOTA_CURSOR_RESOURCE_ID);
+        match adapter.import_history_sync(cursor) {
+            Ok(batch) => self.apply_batch("OpenAI 官方额度 API", batch, state),
+            Err(error) => {
+                // Official quota is additive. An expired OAuth token or a
+                // temporary outage must not stop local Session imports, so the
+                // source error is recorded while the Core remains usable.
+                let message = format!("OpenAI 官方额度刷新失败：{error}");
+                state.warnings.push(message.clone());
+                self.record_source_error(OFFICIAL_QUOTA_DESCRIPTOR, endpoint.into(), message)
             }
         }
     }
@@ -1057,13 +1157,18 @@ impl Core {
         error: String,
     ) -> Result<(), CoreError> {
         let timestamp = Utc::now();
+        let detected_version = if descriptor.id == OFFICIAL_QUOTA_SOURCE_ID {
+            "official-quota"
+        } else {
+            "jsonl"
+        };
         let source = SourceRecord {
             id: descriptor.id.to_owned(),
             adapter_type: descriptor.adapter_type.to_owned(),
             display_name: descriptor.display_name.to_owned(),
             path_or_endpoint: Some(path.to_string_lossy().into_owned()),
             enabled: true,
-            detected_version: Some("jsonl".to_owned()),
+            detected_version: Some(detected_version.to_owned()),
             health_status: Some("error".to_owned()),
             last_success_at: None,
             last_error: Some(error),
@@ -1370,6 +1475,7 @@ mod tests {
             ids,
             vec![
                 "codex-session",
+                "openai-official-quota",
                 "claude-code-session",
                 "cc-switch",
                 "cockpit",
@@ -1404,7 +1510,13 @@ mod tests {
             .collect();
         assert_eq!(
             launchers,
-            vec!["codex-session", "cc-switch", "cockpit", "otel-http"]
+            vec![
+                "codex-session",
+                "openai-official-quota",
+                "cc-switch",
+                "cockpit",
+                "otel-http"
+            ]
         );
     }
 

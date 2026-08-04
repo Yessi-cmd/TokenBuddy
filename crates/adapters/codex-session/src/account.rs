@@ -28,6 +28,17 @@ pub const AUTH_MODE_CHATGPT: &str = "chatgpt";
 /// Auth mode recorded for a plain API key.
 pub const AUTH_MODE_API_KEY: &str = "api_key";
 
+/// Short-lived authentication material used by the independent official quota
+/// adapter. The access token is intentionally kept out of every domain and
+/// storage type; callers must use it only for the request that is in progress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfficialAuthMaterial {
+    /// Current ChatGPT OAuth access token.
+    pub access_token: String,
+    /// Raw ChatGPT account id required by the official backend header.
+    pub account_id: String,
+}
+
 /// The OpenAI provider row that owns the official account. Emitted alongside the
 /// account so the Providers and Quotas views resolve a real name even before the
 /// first usage event of a fresh install has been imported.
@@ -50,9 +61,41 @@ pub fn read_official_account(codex_home: &Path, salt: &str) -> Option<AccountRec
     parse_account(&contents, salt)
 }
 
+/// Read the in-memory OAuth material needed for the official ChatGPT quota
+/// request. API-key auth is deliberately excluded: an OpenAI API key does not
+/// identify a ChatGPT subscription quota window.
+pub fn read_official_auth_material(codex_home: &Path) -> Option<OfficialAuthMaterial> {
+    let contents = fs::read_to_string(codex_home.join(AUTH_FILENAME)).ok()?;
+    parse_auth_material(&contents)
+}
+
 fn parse_account(contents: &str, salt: &str) -> Option<AccountRecord> {
     let value: Value = serde_json::from_str(contents).ok()?;
     chatgpt_account(&value, salt).or_else(|| api_key_account(&value, salt))
+}
+
+fn parse_auth_material(contents: &str) -> Option<OfficialAuthMaterial> {
+    let value: Value = serde_json::from_str(contents).ok()?;
+    let tokens = value.get("tokens")?.as_object()?;
+    let access_token = tokens
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())?
+        .to_owned();
+    let claims = tokens
+        .get("id_token")
+        .and_then(Value::as_str)
+        .and_then(decode_jwt_claims);
+    let account_id = tokens
+        .get("account_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| claim_string(claims.as_ref(), "chatgpt_account_id"))?;
+    Some(OfficialAuthMaterial {
+        access_token,
+        account_id,
+    })
 }
 
 fn chatgpt_account(value: &Value, salt: &str) -> Option<AccountRecord> {
@@ -163,7 +206,7 @@ fn decode_base64_url(input: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::{
         AUTH_MODE_API_KEY, AUTH_MODE_CHATGPT, decode_base64_url, parse_account,
-        read_official_account,
+        parse_auth_material, read_official_account,
     };
 
     const SALT: &str = "test-salt";
@@ -278,6 +321,24 @@ mod tests {
         )
         .expect("write");
         assert!(read_official_account(home.path(), SALT).is_none());
+    }
+
+    #[test]
+    fn reads_quota_auth_material_without_exposing_it_in_the_account_record() {
+        let contents = r#"{"tokens":{"access_token":"access-secret","account_id":"acct-fixture"}}"#;
+        let material = parse_auth_material(contents).expect("OAuth material");
+        assert_eq!(material.access_token, "access-secret");
+        assert_eq!(material.account_id, "acct-fixture");
+
+        let account = parse_account(contents, SALT).expect("account");
+        let serialized = serde_json::to_string(&account).expect("serialize");
+        assert!(!serialized.contains("access-secret"));
+        assert!(!serialized.contains("acct-fixture"));
+    }
+
+    #[test]
+    fn api_key_auth_has_no_chatgpt_quota_material() {
+        assert!(parse_auth_material(r#"{"OPENAI_API_KEY":"sk-fixture"}"#).is_none());
     }
 
     #[test]

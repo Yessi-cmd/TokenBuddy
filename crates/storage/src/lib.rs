@@ -436,7 +436,14 @@ impl Database {
              LEFT JOIN accounts a ON a.id = q.account_id
              LEFT JOIN providers p ON p.id = a.provider_id
              WHERE (?1 IS NULL OR q.account_id = ?1)
-             ORDER BY q.captured_at DESC, q.id DESC
+             ORDER BY q.captured_at DESC,
+                      CASE
+                          WHEN q.window_type LIKE 'primary%' THEN 0
+                          WHEN q.window_type LIKE 'secondary%' THEN 1
+                          WHEN q.window_type = 'credits' THEN 3
+                          ELSE 2
+                      END,
+                      q.id DESC
              LIMIT ?2",
         )?;
         let rows = statement.query_map(
@@ -1070,7 +1077,14 @@ impl Database {
                         credits_remaining, precision
                  FROM quota_snapshots
                  WHERE account_id = ?1
-                 ORDER BY captured_at DESC, id DESC LIMIT 1",
+                 ORDER BY captured_at DESC,
+                          CASE
+                              WHEN window_type LIKE 'primary%' THEN 0
+                              WHEN window_type LIKE 'secondary%' THEN 1
+                              WHEN window_type = 'credits' THEN 3
+                              ELSE 2
+                          END,
+                          id DESC LIMIT 1",
                 params![account_id],
                 |row| {
                     Ok(QuotaSummary {

@@ -1,0 +1,18 @@
+[package]
+name = "tokenbuddy-official-quota"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+reqwest = { workspace = true, features = ["blocking", "json", "rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokenbuddy-codex-session = { path = "../codex-session" }
+tokenbuddy-domain.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -184,6 +184,11 @@ fn list_quota_snapshots(
 }
 
 #[tauri::command]
+fn refresh_official_quota(state: State<'_, AppState>) -> Result<ImportReport, String> {
+    state.core.refresh_official_quota().map_err(core_error)
+}
+
+#[tauri::command]
 fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
     state.core.get_app_settings().map_err(core_error)
 }
@@ -352,6 +357,11 @@ fn detect_codex_path(
             .map_err(|error| error.to_string());
     }
     state.core.detect_codex_path().map_err(core_error)
+}
+
+#[tauri::command]
+fn detect_official_quota_path(state: State<'_, AppState>) -> Result<DetectionResult, String> {
+    state.core.detect_official_quota_path().map_err(core_error)
 }
 
 #[tauri::command]
@@ -983,7 +993,8 @@ pub fn run() {
                 CoreConfig::new(database_path, default_codex_home())
                     .with_claude_home(default_claude_home())
                     .with_cc_switch_db(default_cc_switch_db())
-                    .with_cockpit_db(default_cockpit_db()),
+                    .with_cockpit_db(default_cockpit_db())
+                    .with_official_quota_enabled(true),
             )
             .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
             app.manage(AppState {
@@ -1065,11 +1076,13 @@ pub fn run() {
             list_providers,
             list_accounts,
             list_quota_snapshots,
+            refresh_official_quota,
             pick_directory,
             pick_file,
             get_app_settings,
             update_app_settings,
             detect_codex_path,
+            detect_official_quota_path,
             rescan_codex,
             detect_claude_path,
             rescan_claude,

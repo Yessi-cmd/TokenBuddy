@@ -2000,6 +2000,7 @@ T001 至 T014 是本计划最初定义的第一批任务编号，并不是全部
 [ ] Phase 4b 跨平台真机交互补验：Windows 托盘与 macOS/Windows 菜单栏或托盘交互、隐藏窗口持续采集和 Windows CPU/P95
 [x] Phase 5：OTel（可选回环 OTLP/HTTP traces receiver、Core 集成、跨来源关联与优先级去重）
 [x] Phase 6：CC Switch / Cockpit（只读 Adapter、Provider/账号归因、Codex 官方额度；代理 usage 导入按防重复计数原则不实现）
+[x] Phase 6 官方额度 API 独立适配：直接读取 ChatGPT OAuth 官方额度、无 Cockpit 管理、额度快照幂等与手动刷新
 [ ] Phase 7：可选本地代理
 ```
 
@@ -2032,3 +2033,5 @@ Windows UI 回归修复已完成（2026-07-29）：快速面板在内容高度�
 Adapter descriptor 与隐私默认值硬化已完成（2026-08-04）：Codex、Claude Code、CC Switch 和 Cockpit 均声明集中式 `AdapterDescriptor`，Core 维护统一 Adapter catalog，并明确外部 Adapter 的只读边界，描述每个来源是否提供 usage、Provider/account context、quota 和文件监听能力；错误状态也从 descriptor 生成，避免源信息散落在 Core 分支中。`save_request_metadata` 现在是真正的显式 opt-in：默认导入不把脱敏 `raw_usage_json` 写入 SQLite，关闭设置时会清除历史原始 usage 元数据，normalized token、归因和精度事实保持不变；设置页提供明确的开关和删除提示。OTel Receiver 的具体实现与状态在后续 Phase 5 条目中维护。
 
 Phase 5 OTel 与跨来源关联已完成（2026-08-04）：新增独立 `tokenbuddy-otel-receiver`，只监听 `127.0.0.1` 的 OTLP/HTTP `/v1/traces`，支持 protobuf/JSON，提取 `gen_ai.*` 与兼容别名中的数值 usage、request/response/session/model/provider 和延迟状态；原始请求正文、completion、未知属性和凭据不会进入默认持久化路径。OTel 通过 Core 的同一导入锁、SQLite 事务、QuickSummary 和查询服务入库，端口可留空关闭，端口冲突只产生 warning，不阻塞主应用。新增 `correlation_key` 及 source/precision precedence，同一 request/response 的 OTel、Session 等观察只保留更强事实并报告校正数，Otel-only span 也会生成无正文会话元数据。当前限制是仅支持 HTTP traces，不支持 OTLP gRPC/metrics/logs；缺少 app identity 的 span 保持 `unknown`，本地 Proxy 仍未实现；Windows 托盘和运行时验收仍待 Windows CI/真机。
+
+官方额度 API 独立适配已完成（2026-08-04）：新增 `tokenbuddy-official-quota`，从 Codex Home 的 ChatGPT OAuth 登录态读取 access token 与 account id，并按官方 Codex 客户端使用的 `/backend-api/wham/usage` 路径（以及 Codex API 兼容路径）请求额度窗口。token 只在一次请求内存中使用，不进入 domain、cursor、source error 或 SQLite；API Key 登录保持官方 ChatGPT 订阅额度 `Unavailable`。官方响应会拆成独立 `QuotaSnapshot`，保留缺失字段、Credits、重置时间和 `Verified` 精度；响应 hash 作为增量 cursor，重复轮询不增加快照。Core 在桌面正式配置中启动时和后台轮询时刷新该数据源，官方接口失败只记录官方源告警，不阻断本地 Codex/Claude 统计；配置 CC Switch 或 Cockpit 不再阻止官方额度请求，未配置它们也能通过 Tauri/loopback 的手动刷新入口管理官方 ChatGPT 使用情况。新增脱敏响应 fixture、官方适配器请求头/幂等测试及无 Cockpit 的 Core 集成测试。当前限制：依赖 Codex Home 中仍有效的文件型 OAuth 登录态；access token 过期时提示重新登录，不在 TokenBuddy 内刷新或写回凭据；官方额度接口是随官方客户端验证的后端契约，若上游响应 schema 变化需更新 parser；Windows 真机托盘与额度网络场景仍待跨平台验收。

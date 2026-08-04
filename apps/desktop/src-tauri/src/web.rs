@@ -275,6 +275,9 @@ fn route_request_with_autostart(
             core.list_quota_snapshots(account_id.as_deref(), limit)
                 .map_or_else(api_error, |quotas| json_response(200, &quotas))
         }
+        ("POST", "/api/refresh-official-quota") => core
+            .refresh_official_quota()
+            .map_or_else(api_error, |report| json_response(200, &report)),
         ("GET", "/api/settings") => core
             .get_app_settings()
             .map_or_else(api_error, |settings| json_response(200, &settings)),
@@ -290,6 +293,9 @@ fn route_request_with_autostart(
                     .map_or_else(api_error, |result| json_response(200, &result)),
             }
         }
+        ("GET", "/api/detect-official-quota") => core
+            .detect_official_quota_path()
+            .map_or_else(api_error, |result| json_response(200, &result)),
         ("GET", "/api/detect-claude") => {
             let detection = query_value(query, "claude_home")
                 .filter(|value| !value.trim().is_empty())

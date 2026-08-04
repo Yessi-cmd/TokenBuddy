@@ -3,7 +3,9 @@ import { useEffect, useState } from "react";
 import {
   listAccounts,
   listQuotaSnapshots,
+  refreshOfficialQuota,
   type AccountSummary,
+  type QuotaSummary,
   type QuotaSnapshot,
 } from "../../lib/api";
 import { PageFrame } from "../../components/Navigation";
@@ -15,10 +17,35 @@ import {
   precisionLabel,
 } from "../../lib/format";
 
+function formatCredits(value: number | null) {
+  return value == null
+    ? "Unavailable"
+    : new Intl.NumberFormat("zh-CN", {
+        maximumFractionDigits: 2,
+      }).format(value);
+}
+
+function quotaHeadline(quota: QuotaSnapshot | QuotaSummary | null) {
+  if (!quota) return "额度 Unavailable";
+  if (quota.window_type === "credits") {
+    return `Credits 剩余 ${formatCredits(quota.credits_remaining)}`;
+  }
+  return `${quota.window_type} ${formatPercent(quota.used_percent)} 已用`;
+}
+
+function quotaDetail(quota: QuotaSnapshot | QuotaSummary | null) {
+  if (!quota) return "该账号尚未报告官方额度窗口";
+  if (quota.window_type === "credits") {
+    return `额度余额 ${formatCredits(quota.credits_remaining)} · ${precisionLabel(quota.precision)}`;
+  }
+  return `剩余 ${formatPercent(quota.remaining_percent)} · ${precisionLabel(quota.precision)}`;
+}
+
 export function QuotasView() {
   const [quotas, setQuotas] = useState<QuotaSnapshot[]>([]);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -38,11 +65,34 @@ export function QuotasView() {
     };
   }, []);
 
+  async function handleRefresh() {
+    setIsRefreshing(true);
+    try {
+      await refreshOfficialQuota();
+      const [nextQuotas, nextAccounts] = await Promise.all([
+        listQuotaSnapshots(),
+        listAccounts(),
+      ]);
+      setQuotas(nextQuotas);
+      setAccounts(nextAccounts);
+      setError(null);
+    } catch (cause) {
+      console.error("刷新官方额度失败", cause);
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "官方额度刷新失败，请检查 Codex 登录状态。",
+      );
+    } finally {
+      setIsRefreshing(false);
+    }
+  }
+
   return (
     <PageFrame
       eyebrow="Official quota windows"
       title="官方额度"
-      subtitle="额度窗口与原始 Token 分开保存；不会从百分比反推准确 Token。"
+      subtitle="官方额度与原始 Token 分开保存；不依赖 Cockpit，也不会从百分比反推准确 Token。"
     >
       {error ? <p className="notice notice-warning">{error}</p> : null}
       <section className="panel route-panel" aria-label="已识别账号">
@@ -51,6 +101,14 @@ export function QuotasView() {
             <p className="section-kicker">Accounts</p>
             <h2>已识别账号</h2>
           </div>
+          <button
+            className="quiet-button"
+            type="button"
+            onClick={() => void handleRefresh()}
+            disabled={isRefreshing}
+          >
+            {isRefreshing ? "刷新中…" : "刷新官方额度"}
+          </button>
         </div>
         {accounts.length ? (
           <div className="quota-list">
@@ -68,14 +126,12 @@ export function QuotasView() {
                   <span>指纹 {account.account_fingerprint.slice(0, 12)}</span>
                 </div>
                 <div>
-                  <strong>
-                    {latest_quota
-                      ? `${latest_quota.window_type} ${formatPercent(latest_quota.used_percent)} 已用`
-                      : "额度 Unavailable"}
-                  </strong>
+                  <strong>{quotaHeadline(latest_quota)}</strong>
                   <span>
                     {latest_quota
-                      ? precisionLabel(latest_quota.precision)
+                      ? latest_quota.window_type === "credits"
+                        ? quotaDetail(latest_quota)
+                        : precisionLabel(latest_quota.precision)
                       : "该账号尚未报告官方额度窗口"}
                   </span>
                 </div>
@@ -102,11 +158,12 @@ export function QuotasView() {
                   </span>
                 </div>
                 <div>
-                  <strong>{formatPercent(quota.used_percent)} 已用</strong>
-                  <span>
-                    剩余 {formatPercent(quota.remaining_percent)} ·{" "}
-                    {precisionLabel(quota.precision)}
-                  </span>
+                  <strong>
+                    {quota.window_type === "credits"
+                      ? quotaHeadline(quota)
+                      : `${formatPercent(quota.used_percent)} 已用`}
+                  </strong>
+                  <span>{quotaDetail(quota)}</span>
                 </div>
                 <div>
                   <strong>{formatDate(quota.captured_at)}</strong>
