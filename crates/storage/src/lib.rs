@@ -1005,7 +1005,12 @@ impl Database {
             value: now.to_rfc3339(),
         })?;
         let period_end = period_start + chrono::Duration::days(1);
-        let today_total_tokens = self.total_tokens_for_period(period_start, period_end)?;
+        let today_totals = self.usage_totals_for_period(period_start, period_end)?;
+        let today_total_tokens = if today_totals.event_count == 0 {
+            Some(0)
+        } else {
+            today_totals.total_tokens()
+        };
 
         let active = self
             .connection
@@ -1082,7 +1087,15 @@ impl Database {
             session_cache_hit_rate: session_totals
                 .as_ref()
                 .and_then(|totals| totals.cache_hit_rate_percent),
+            session_provider_reported_cost: session_totals
+                .as_ref()
+                .and_then(|totals| totals.provider_reported_cost),
+            session_estimated_cost: session_totals
+                .as_ref()
+                .and_then(|totals| totals.estimated_cost),
             today_total_tokens,
+            today_provider_reported_cost: today_totals.provider_reported_cost,
+            today_estimated_cost: today_totals.estimated_cost,
             quota_summary,
             latest_warning,
         })
@@ -1181,55 +1194,29 @@ impl Database {
             .map_err(Into::into)
     }
 
-    fn total_tokens_for_period(
+    fn usage_totals_for_period(
         &self,
         period_start: DateTime<Utc>,
         period_end: DateTime<Utc>,
-    ) -> Result<Option<u64>> {
-        let (event_count, input_count, output_count, input_sum, output_sum): (
-            i64,
-            i64,
-            i64,
-            Option<i64>,
-            Option<i64>,
-        ) = self.connection.query_row(
-            "SELECT COUNT(*), COUNT(input_tokens_total), COUNT(output_tokens_total),
-                        SUM(input_tokens_total), SUM(output_tokens_total)
+    ) -> Result<UsageTotals> {
+        self.connection
+            .query_row(
+                "SELECT COUNT(*),
+                        COUNT(input_tokens_total), SUM(input_tokens_total),
+                        COUNT(input_tokens_uncached), SUM(input_tokens_uncached),
+                        COUNT(cache_read_tokens), SUM(cache_read_tokens),
+                        COUNT(cache_write_tokens), SUM(cache_write_tokens),
+                        COUNT(output_tokens_total), SUM(output_tokens_total),
+                        COUNT(reasoning_tokens), SUM(reasoning_tokens),
+                        COUNT(visible_output_tokens), SUM(visible_output_tokens),
+                        COUNT(provider_reported_cost), SUM(provider_reported_cost),
+                        COUNT(estimated_cost), SUM(estimated_cost)
                  FROM usage_events
                  WHERE occurred_at >= ?1 AND occurred_at < ?2",
-            params![period_start.to_rfc3339(), period_end.to_rfc3339()],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )?;
-        if event_count == 0 {
-            return Ok(Some(0));
-        }
-        if input_count != event_count || output_count != event_count {
-            return Ok(None);
-        }
-        let input = option_u64(input_sum, "input_tokens_total")?.ok_or_else(|| {
-            StorageError::InvalidTokenCount {
-                field: "input_tokens_total".to_owned(),
-            }
-        })?;
-        let output = option_u64(output_sum, "output_tokens_total")?.ok_or_else(|| {
-            StorageError::InvalidTokenCount {
-                field: "output_tokens_total".to_owned(),
-            }
-        })?;
-        input
-            .checked_add(output)
-            .map(Some)
-            .ok_or_else(|| StorageError::InvalidTokenCount {
-                field: "today_total_tokens".to_owned(),
-            })
+                params![period_start.to_rfc3339(), period_end.to_rfc3339()],
+                totals_from_row,
+            )
+            .map_err(Into::into)
     }
 }
 
@@ -3191,6 +3178,17 @@ mod tests {
         assert_eq!(event.model.as_deref(), Some("gpt-5-codex"));
         assert!((event.estimated_cost.expect("estimated cost") - 0.000396875).abs() < f64::EPSILON);
         assert_eq!(event.currency.as_deref(), Some("USD"));
+
+        let quick = database
+            .quick_summary(Utc::now(), CollectionStatus::Collecting, None)
+            .expect("quick summary");
+        assert!(
+            (quick.session_estimated_cost.expect("session cost") - 0.000396875).abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (quick.today_estimated_cost.expect("today cost") - 0.000396875).abs() < f64::EPSILON
+        );
     }
 
     #[test]

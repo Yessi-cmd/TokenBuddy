@@ -649,7 +649,7 @@ export function DashboardView() {
           value={formatPercent(totals.cache_hit_rate_percent)}
         />
         <MetricCard label="事件数" value={formatTokens(totals.event_count)} />
-        <MetricCard label="费用" value={formatCost(totals)} tone="ink" />
+        <MetricCard label="费用（USD）" value={formatCost(totals)} tone="ink" />
       </section>
 
       <section
@@ -663,7 +663,7 @@ export function DashboardView() {
             </p>
             <h2>按模型 / 供应商</h2>
             <p className="panel-note">
-              费用优先使用供应商实报；带 “~”
+              费用以 USD 展示，优先使用供应商实报；带 “~”
               的数值是按模型价格表估算。部分会话日志未拆分缓存写入时，仅按已记录的输入、缓存命中和输出估算。
             </p>
           </div>
@@ -680,7 +680,7 @@ export function DashboardView() {
                   <th scope="col">输出</th>
                   <th scope="col">缓存命中率</th>
                   <th scope="col">事件</th>
-                  <th scope="col">费用</th>
+                  <th scope="col">费用（USD）</th>
                 </tr>
               </thead>
               <tbody>

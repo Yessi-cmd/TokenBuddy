@@ -19,6 +19,7 @@ import {
   collectionStatusLabel,
   describeError,
   formatDate,
+  formatCostValue,
   formatPercent,
   formatTokens,
 } from "../../lib/format";
@@ -135,6 +136,13 @@ export function QuickSummaryView() {
             </span>
           }
         />
+        <MenuValueRow
+          label="费用（USD）"
+          value={formatCostValue(
+            summary?.today_provider_reported_cost,
+            summary?.today_estimated_cost,
+          )}
+        />
 
         <MenuSeparator />
         <MenuGroupTitle>最近活动会话</MenuGroupTitle>
@@ -159,6 +167,13 @@ export function QuickSummaryView() {
         <MenuValueRow
           label="缓存命中率"
           value={formatPercent(summary?.session_cache_hit_rate ?? null)}
+        />
+        <MenuValueRow
+          label="费用（USD）"
+          value={formatCostValue(
+            summary?.session_provider_reported_cost,
+            summary?.session_estimated_cost,
+          )}
         />
         {summary?.active_project_path ? (
           <p className="menu-caption">项目：{summary.active_project_path}</p>

@@ -71,7 +71,10 @@ export function ProvidersView() {
                   label="输入 / 输出"
                   value={`${formatTokens(provider.totals.input_tokens_total)} / ${formatTokens(provider.totals.output_tokens_total)}`}
                 />
-                <SummaryItem label="费用" value={formatCost(provider.totals)} />
+                <SummaryItem
+                  label="费用（USD）"
+                  value={formatCost(provider.totals)}
+                />
               </dl>
             </article>
           ))}

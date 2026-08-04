@@ -115,7 +115,11 @@ describe("App", () => {
       session_cache_read_tokens: 20,
       session_output_tokens: 40,
       session_cache_hit_rate: 20,
+      session_provider_reported_cost: null,
+      session_estimated_cost: 0.0005,
       today_total_tokens: 140,
+      today_provider_reported_cost: null,
+      today_estimated_cost: 0.0014,
       quota_summary: null,
       latest_warning: null,
     });
@@ -173,6 +177,8 @@ describe("App", () => {
       expect(screen.getByText("今日 Token")).toBeInTheDocument();
     });
     expect(screen.getByText("140")).toBeInTheDocument();
+    expect(screen.getByText("~$0.0014 USD")).toBeInTheDocument();
+    expect(screen.getByText("~$0.0005 USD")).toBeInTheDocument();
     expect(screen.getByText("采集中")).toBeInTheDocument();
     expect(screen.getByText("Fixture session")).toBeInTheDocument();
     expect(screen.getByText("项目：/sanitized/project")).toBeInTheDocument();
@@ -197,7 +203,11 @@ describe("App", () => {
       session_cache_read_tokens: 80,
       session_output_tokens: 70,
       session_cache_hit_rate: 36.4,
+      session_provider_reported_cost: null,
+      session_estimated_cost: 0.0012,
       today_total_tokens: 290,
+      today_provider_reported_cost: null,
+      today_estimated_cost: 0.0012,
       quota_summary: null,
       latest_warning: null,
     });
@@ -813,7 +823,11 @@ describe("Quick summary panel", () => {
       session_cache_read_tokens: 20,
       session_output_tokens: 40,
       session_cache_hit_rate: 20,
+      session_provider_reported_cost: null,
+      session_estimated_cost: 0.0005,
       today_total_tokens: 140,
+      today_provider_reported_cost: null,
+      today_estimated_cost: 0.0005,
       quota_summary: {
         window_type: "primary_5h",
         used_percent: 18.75,
@@ -852,7 +866,11 @@ describe("Quick summary panel", () => {
       session_cache_read_tokens: null,
       session_output_tokens: null,
       session_cache_hit_rate: null,
+      session_provider_reported_cost: null,
+      session_estimated_cost: null,
       today_total_tokens: null,
+      today_provider_reported_cost: null,
+      today_estimated_cost: null,
       quota_summary: null,
       latest_warning: null,
     });
@@ -892,7 +910,11 @@ describe("Quick summary panel", () => {
       session_cache_read_tokens: 20,
       session_output_tokens: 40,
       session_cache_hit_rate: 20,
+      session_provider_reported_cost: null,
+      session_estimated_cost: 0.0005,
       today_total_tokens: 140,
+      today_provider_reported_cost: null,
+      today_estimated_cost: 0.0005,
       quota_summary: null,
       latest_warning: null,
     });
@@ -1115,7 +1137,11 @@ describe("Quick panel window fitting", () => {
       session_cache_read_tokens: 20,
       session_output_tokens: 40,
       session_cache_hit_rate: 20,
+      session_provider_reported_cost: null,
+      session_estimated_cost: 0.0005,
       today_total_tokens: 140,
+      today_provider_reported_cost: null,
+      today_estimated_cost: 0.0005,
       quota_summary: null,
       latest_warning: null,
     });

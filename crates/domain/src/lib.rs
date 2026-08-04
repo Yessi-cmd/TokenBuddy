@@ -377,9 +377,19 @@ pub struct QuickSummary {
     pub session_output_tokens: Option<u64>,
     /// Cache hit rate of the active session, as a percentage.
     pub session_cache_hit_rate: Option<f64>,
+    /// Provider-reported cost of the active session, when every event reports
+    /// one.
+    pub session_provider_reported_cost: Option<f64>,
+    /// API-equivalent estimated cost of the active session, when every event
+    /// has a supported price and complete billable usage.
+    pub session_estimated_cost: Option<f64>,
     /// Total tokens for the user's local calendar day — the same "today" the
     /// dashboard uses, so the two never disagree.
     pub today_total_tokens: Option<u64>,
+    /// Provider-reported cost for the user's local calendar day.
+    pub today_provider_reported_cost: Option<f64>,
+    /// API-equivalent estimated cost for the user's local calendar day.
+    pub today_estimated_cost: Option<f64>,
     /// Newest official quota window for the active account, if any.
     pub quota_summary: Option<QuotaSummary>,
     /// The most recent collection warning, surfaced instead of being buried in
@@ -403,7 +413,11 @@ impl QuickSummary {
             session_cache_read_tokens: None,
             session_output_tokens: None,
             session_cache_hit_rate: None,
+            session_provider_reported_cost: None,
+            session_estimated_cost: None,
             today_total_tokens: None,
+            today_provider_reported_cost: None,
+            today_estimated_cost: None,
             quota_summary: None,
             latest_warning: None,
         }

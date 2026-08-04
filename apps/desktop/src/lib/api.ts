@@ -35,7 +35,11 @@ export interface QuickSummary {
   session_cache_read_tokens: number | null;
   session_output_tokens: number | null;
   session_cache_hit_rate: number | null;
+  session_provider_reported_cost: number | null;
+  session_estimated_cost: number | null;
   today_total_tokens: number | null;
+  today_provider_reported_cost: number | null;
+  today_estimated_cost: number | null;
   quota_summary: QuotaSummary | null;
   latest_warning: string | null;
 }

@@ -24,12 +24,18 @@ export function formatPercent(value: number | null): string {
   return value == null ? "Unavailable" : `${value.toFixed(1)}%`;
 }
 
-export function formatCost(totals: UsageTotals): string {
-  if (totals.provider_reported_cost != null)
-    return totals.provider_reported_cost.toFixed(4);
-  if (totals.estimated_cost != null)
-    return `~${totals.estimated_cost.toFixed(4)}`;
+export function formatCostValue(
+  providerReportedCost: number | null | undefined,
+  estimatedCost: number | null | undefined,
+): string {
+  if (providerReportedCost != null)
+    return `$${providerReportedCost.toFixed(4)} USD`;
+  if (estimatedCost != null) return `~$${estimatedCost.toFixed(4)} USD`;
   return "N/A";
+}
+
+export function formatCost(totals: UsageTotals): string {
+  return formatCostValue(totals.provider_reported_cost, totals.estimated_cost);
 }
 
 export function formatDate(value: string): string {

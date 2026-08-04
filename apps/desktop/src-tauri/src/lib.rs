@@ -882,11 +882,25 @@ fn tray_tooltip(summary: &QuickSummary) -> String {
     let today = summary
         .today_total_tokens
         .map_or_else(|| "Unavailable".to_owned(), |value| value.to_string());
+    let today_cost = tray_cost(
+        summary.today_provider_reported_cost,
+        summary.today_estimated_cost,
+    );
     let provider = summary.provider_name.as_deref().unwrap_or("Unavailable");
     format!(
-        "TokenBuddy · 今日 {today} · {} · Provider {provider}",
+        "TokenBuddy · 今日 {today} · 费用 {today_cost} · {} · Provider {provider}",
         summary.collection_status
     )
+}
+
+fn tray_cost(provider_reported_cost: Option<f64>, estimated_cost: Option<f64>) -> String {
+    if let Some(value) = provider_reported_cost {
+        return format!("${value:.4} USD");
+    }
+    if let Some(value) = estimated_cost {
+        return format!("~${value:.4} USD");
+    }
+    "N/A".to_owned()
 }
 
 fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
@@ -1153,14 +1167,18 @@ mod tests {
             session_cache_read_tokens: None,
             session_output_tokens: None,
             session_cache_hit_rate: None,
+            session_provider_reported_cost: None,
+            session_estimated_cost: None,
             today_total_tokens: Some(60_768_325),
+            today_provider_reported_cost: None,
+            today_estimated_cost: Some(3.8272),
             quota_summary: None,
             latest_warning: None,
         };
 
         assert_eq!(
             tray_tooltip(&summary),
-            "TokenBuddy · 今日 60768325 · idle · Provider OpenAI"
+            "TokenBuddy · 今日 60768325 · 费用 ~$3.8272 USD · idle · Provider OpenAI"
         );
     }
 
