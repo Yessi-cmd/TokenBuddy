@@ -20,6 +20,7 @@ use tokenbuddy_domain::{
     NormalizedUsage, PrecisionLevel, ProviderRecord, ProviderSummary, QuickSummary, QuotaSnapshot,
     QuotaSummary, SessionDetail, SessionPage, SessionProviderAttribution, SessionRecord,
     SessionSummary, SourceRecord, UsageEvent, UsageEventPage, UsageFilters, UsageTotals,
+    correlation_key,
 };
 
 /// Result of any storage operation.
@@ -84,6 +85,8 @@ pub struct ImportStats {
     pub inserted_events: u64,
     /// Events already present, recognised by hash.
     pub duplicate_events: u64,
+    /// Lower-priority observations replaced by a stronger correlated source.
+    pub reconciled_events: u64,
     /// Sessions created or refreshed.
     pub upserted_sessions: u64,
     /// Cursors advanced.
@@ -183,6 +186,10 @@ impl Database {
     /// and earlier rows get backfilled; cursors last so a failure re-reads the
     /// same input rather than skipping it.
     pub fn apply_import_batch(&mut self, batch: &ImportBatch) -> Result<ImportStats> {
+        // Read the setting once per transaction. The default is false, so a
+        // caller that opens a fresh database cannot accidentally persist raw
+        // usage metadata merely by constructing a UsageEvent with it attached.
+        let save_request_metadata = self.get_app_settings()?.save_request_metadata;
         let transaction = self.connection.transaction()?;
         let mut stats = ImportStats {
             upserted_sessions: batch.sessions.len() as u64,
@@ -259,11 +266,12 @@ impl Database {
                 derived.as_ref(),
                 attributed.as_ref(),
                 windowed_account.as_deref(),
+                save_request_metadata,
             )?;
-            if inserted {
-                stats.inserted_events += 1;
-            } else {
-                stats.duplicate_events += 1;
+            match inserted {
+                InsertOutcome::Inserted => stats.inserted_events += 1,
+                InsertOutcome::Duplicate => stats.duplicate_events += 1,
+                InsertOutcome::Reconciled => stats.reconciled_events += 1,
             }
         }
 
@@ -521,6 +529,18 @@ impl Database {
                 settings.data_retention_days.map(i64::from),
             ],
         )?;
+        // Request metadata is an explicit opt-in. Clearing the setting must
+        // also clear metadata already persisted by an earlier opt-in; otherwise
+        // turning the switch off would only affect future imports and leave the
+        // privacy-sensitive history behind. Token counts and attribution remain
+        // intact because they are normalized facts, not request contents.
+        if !settings.save_request_metadata {
+            self.connection.execute(
+                "UPDATE usage_events SET raw_usage_json = NULL
+                  WHERE raw_usage_json IS NOT NULL",
+                [],
+            )?;
+        }
         Ok(())
     }
 
@@ -1640,18 +1660,114 @@ fn upsert_session(conn: &Connection, session: &SessionRecord) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InsertOutcome {
+    /// A new request observation was stored.
+    Inserted,
+    /// The observation was already represented by an equal or stronger row.
+    Duplicate,
+    /// A weaker source row was replaced by this stronger observation.
+    Reconciled,
+}
+
+#[derive(Debug)]
+struct StoredCorrelation {
+    id: String,
+    raw_event_hash: String,
+    ingest_source: tokenbuddy_domain::IngestSource,
+    precision_token: PrecisionLevel,
+}
+
+fn correlated_events(conn: &Connection, event: &UsageEvent) -> Result<Vec<StoredCorrelation>> {
+    let Some(_key) = correlation_key(
+        event.app,
+        event.request_id.as_deref(),
+        event.response_id.as_deref(),
+    ) else {
+        return Ok(Vec::new());
+    };
+    let mut statement = conn.prepare(
+        "SELECT id, raw_event_hash, ingest_source, precision_token
+           FROM usage_events
+          WHERE app = ?1
+            AND ((?2 IS NOT NULL AND request_id = ?2)
+              OR (?3 IS NOT NULL AND response_id = ?3))",
+    )?;
+    let mut rows = statement.query(params![
+        event.app.as_str(),
+        event.request_id.as_deref(),
+        event.response_id.as_deref(),
+    ])?;
+    let mut correlations = Vec::new();
+    while let Some(row) = rows.next()? {
+        let ingest_source = ingest_source_from_str(&row.get::<_, String>(2)?)?;
+        let precision_token = precision_from_str(&row.get::<_, String>(3)?)?;
+        correlations.push(StoredCorrelation {
+            id: row.get(0)?,
+            raw_event_hash: row.get(1)?,
+            ingest_source,
+            precision_token,
+        });
+    }
+    Ok(correlations)
+}
+
 fn insert_usage_event(
     conn: &Connection,
     event: &UsageEvent,
     derived: Option<&DerivedProvider>,
     attributed: Option<&SessionProviderAttribution>,
     windowed_account: Option<&str>,
-) -> Result<bool> {
-    let raw_usage_json = event
-        .raw_usage_json
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()?;
+    save_request_metadata: bool,
+) -> Result<InsertOutcome> {
+    let existing = correlated_events(conn, event)?;
+    if existing
+        .iter()
+        .any(|stored| stored.raw_event_hash == event.raw_event_hash)
+    {
+        return Ok(InsertOutcome::Duplicate);
+    }
+    let new_score = (
+        event.precision_token.precedence(),
+        event.ingest_source.precedence(),
+    );
+    let stronger_than_existing = existing.iter().max_by_key(|stored| {
+        (
+            stored.precision_token.precedence(),
+            stored.ingest_source.precedence(),
+        )
+    });
+    let reconciled = if let Some(stored) = stronger_than_existing {
+        let existing_score = (
+            stored.precision_token.precedence(),
+            stored.ingest_source.precedence(),
+        );
+        if new_score <= existing_score {
+            // Same request, same or stronger observation already stored: do not
+            // count a second row merely because the source encoded it differently.
+            return Ok(InsertOutcome::Duplicate);
+        }
+        // A higher-confidence source (for example OTel Verified) replaces the
+        // lower-confidence session/proxy observation. Deleting every correlated
+        // row also heals databases produced by an older build that had no
+        // cross-source reconciliation yet.
+        for row in &existing {
+            conn.execute("DELETE FROM usage_events WHERE id = ?1", params![row.id])?;
+        }
+        true
+    } else {
+        false
+    };
+
+    let raw_usage_json = if save_request_metadata {
+        event
+            .raw_usage_json
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?
+    } else {
+        None
+    };
     // Precedence: launcher-reported truth > identity the adapter already
     // resolved > provider guessed from the model name.
     let provider_id = attributed
@@ -1723,7 +1839,15 @@ fn insert_usage_event(
             now().to_rfc3339(),
         ],
     )?;
-    Ok(changed == 1)
+    Ok(if changed == 1 {
+        if reconciled {
+            InsertOutcome::Reconciled
+        } else {
+            InsertOutcome::Inserted
+        }
+    } else {
+        InsertOutcome::Duplicate
+    })
 }
 
 /// A provider (and grouping account) inferred from a session-log event's model
@@ -2599,6 +2723,134 @@ mod tests {
             !serde_json::to_string(&settings)
                 .expect("json")
                 .contains(&salt)
+        );
+    }
+
+    #[test]
+    fn raw_usage_metadata_is_opt_in_and_revocation_purges_existing_rows() {
+        let mut database = Database::open_in_memory().expect("database opens");
+
+        // Adapters may keep a sanitized usage object in memory for hashing and
+        // diagnostics, but a fresh install must not persist it by default.
+        database
+            .apply_import_batch(&ImportBatch {
+                usage_events: vec![event("metadata-default", Some(10))],
+                ..ImportBatch::default()
+            })
+            .expect("default import");
+        let stored = database
+            .list_usage_events(None, 100, 0)
+            .expect("stored events")
+            .events;
+        assert_eq!(stored[0].raw_usage_json, None);
+
+        // The explicit opt-in preserves the sanitized usage object for future
+        // imports; it does not retroactively restore metadata already discarded.
+        database
+            .save_app_settings(&AppSettings {
+                save_request_metadata: true,
+                ..AppSettings::default()
+            })
+            .expect("enable metadata");
+        database
+            .apply_import_batch(&ImportBatch {
+                usage_events: vec![event("metadata-opt-in", Some(20))],
+                ..ImportBatch::default()
+            })
+            .expect("opt-in import");
+        let stored = database
+            .list_usage_events(None, 100, 0)
+            .expect("stored events")
+            .events;
+        assert!(
+            stored
+                .iter()
+                .find(|event| event.id == "metadata-opt-in")
+                .and_then(|event| event.raw_usage_json.as_ref())
+                .is_some()
+        );
+
+        // Turning the setting off is a deletion request for the stored metadata,
+        // not merely a preference for later imports.
+        database
+            .save_app_settings(&AppSettings::default())
+            .expect("disable metadata");
+        let stored = database
+            .list_usage_events(None, 100, 0)
+            .expect("stored events")
+            .events;
+        assert!(stored.iter().all(|event| event.raw_usage_json.is_none()));
+
+        database
+            .apply_import_batch(&ImportBatch {
+                usage_events: vec![event("metadata-after-revocation", Some(30))],
+                ..ImportBatch::default()
+            })
+            .expect("post-revocation import");
+        let post_revocation = database
+            .list_usage_events(None, 100, 0)
+            .expect("stored events")
+            .events
+            .into_iter()
+            .find(|event| event.id == "metadata-after-revocation")
+            .expect("post-revocation event");
+        assert_eq!(post_revocation.raw_usage_json, None);
+    }
+
+    #[test]
+    fn a_stronger_correlated_source_replaces_a_weaker_row_without_double_counting() {
+        let mut database = Database::open_in_memory().expect("database opens");
+        let mut session_observation = event("session-observation", Some(100));
+        session_observation.request_id = Some("shared-request".to_owned());
+
+        let first = database
+            .apply_import_batch(&ImportBatch {
+                usage_events: vec![session_observation],
+                ..ImportBatch::default()
+            })
+            .expect("session observation");
+        assert_eq!(first.inserted_events, 1);
+
+        let mut otel_observation = event("otel-observation", Some(140));
+        otel_observation.request_id = Some("shared-request".to_owned());
+        otel_observation.ingest_source = IngestSource::Otel;
+        otel_observation.precision_token = PrecisionLevel::Verified;
+        otel_observation.usage.output_tokens_total = Some(60);
+        let reconciled = database
+            .apply_import_batch(&ImportBatch {
+                usage_events: vec![otel_observation],
+                ..ImportBatch::default()
+            })
+            .expect("OTel observation");
+        assert_eq!(reconciled.inserted_events, 0);
+        assert_eq!(reconciled.reconciled_events, 1);
+
+        let stored = database
+            .list_usage_events(None, 100, 0)
+            .expect("stored events")
+            .events;
+        assert_eq!(stored.len(), 1, "one request must remain one event");
+        assert_eq!(stored[0].id, "otel-observation");
+        assert_eq!(stored[0].ingest_source, IngestSource::Otel);
+        assert_eq!(stored[0].usage.input_tokens_total, Some(140));
+
+        // A later session-log copy cannot replace the verified OTel observation.
+        let mut late_session = event("late-session-observation", Some(101));
+        late_session.request_id = Some("shared-request".to_owned());
+        let duplicate = database
+            .apply_import_batch(&ImportBatch {
+                usage_events: vec![late_session],
+                ..ImportBatch::default()
+            })
+            .expect("late session observation");
+        assert_eq!(duplicate.duplicate_events, 1);
+        assert_eq!(
+            database
+                .list_usage_events(None, 100, 0)
+                .expect("stored events")
+                .events
+                .len(),
+            1
         );
     }
 

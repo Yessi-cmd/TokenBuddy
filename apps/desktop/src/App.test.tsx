@@ -496,6 +496,15 @@ describe("App panels", () => {
     });
   });
 
+  it("does not reserve a detection row before any source is checked", async () => {
+    const { container } = render(<App />);
+
+    await screen.findByRole("button", { name: "检测 Codex" });
+    expect(
+      container.querySelector(".source-detections"),
+    ).not.toBeInTheDocument();
+  });
+
   it("reports each detection independently", async () => {
     vi.mocked(detectCodexPath).mockResolvedValue({
       source_id: "codex-session",
@@ -554,7 +563,7 @@ describe("App panels", () => {
     // than discarding the whole scan.
     await waitFor(() => {
       expect(
-        screen.getByText("扫描完成：新增 4 条事件，跳过 4 条记录"),
+        screen.getByText("扫描完成：新增 4 条事件，校正 0 条，跳过 4 条记录"),
       ).toBeInTheDocument();
     });
     const problems = screen.getByText(/CC-Switch 扫描失败/);

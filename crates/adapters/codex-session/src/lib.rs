@@ -27,9 +27,10 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokenbuddy_domain::{
-    AccountRecord, AdapterError, AppKind, DetectionResult, EventSink, ImportBatch, ImportCursor,
-    IngestSource, LauncherKind, NormalizedUsage, PrecisionLevel, QuotaSnapshot, SessionRecord,
-    SourceHealth, SourceRecord, UsageAdapter, UsageEvent, WatcherHandle,
+    AccountRecord, AdapterCapabilities, AdapterDescriptor, AdapterError, AppKind, DetectionResult,
+    EventSink, ImportBatch, ImportCursor, IngestSource, LauncherKind, NormalizedUsage,
+    PrecisionLevel, QuotaSnapshot, SessionRecord, SourceHealth, SourceRecord, UsageAdapter,
+    UsageEvent, WatcherHandle,
 };
 
 /// Stable id of this source, used for cursors, event hashes, and session ids.
@@ -38,6 +39,19 @@ pub const SOURCE_ID: &str = "codex-session";
 pub const ADAPTER_TYPE: &str = "codex_session";
 /// Name shown in the UI.
 pub const DISPLAY_NAME: &str = "Codex Sessions";
+/// Static capabilities advertised to the Core registry.
+pub const DESCRIPTOR: AdapterDescriptor = AdapterDescriptor {
+    id: SOURCE_ID,
+    adapter_type: ADAPTER_TYPE,
+    display_name: DISPLAY_NAME,
+    capabilities: AdapterCapabilities {
+        usage_events: true,
+        provider_context: true,
+        quota_snapshots: true,
+        file_watch: true,
+    },
+    read_only: true,
+};
 const SESSION_INDEX_RESOURCE_ID: &str = "session_index.jsonl";
 
 /// Why reading the Codex session logs failed.
@@ -218,9 +232,9 @@ impl CodexSessionAdapter {
     fn source_record(&self, status: &str) -> SourceRecord {
         let timestamp = now();
         SourceRecord {
-            id: SOURCE_ID.to_owned(),
-            adapter_type: ADAPTER_TYPE.to_owned(),
-            display_name: DISPLAY_NAME.to_owned(),
+            id: DESCRIPTOR.id.to_owned(),
+            adapter_type: DESCRIPTOR.adapter_type.to_owned(),
+            display_name: DESCRIPTOR.display_name.to_owned(),
             path_or_endpoint: Some(self.codex_home.to_string_lossy().into_owned()),
             enabled: true,
             detected_version: Some("jsonl".to_owned()),
@@ -561,7 +575,11 @@ impl UsageAdapter for CodexSessionAdapter {
     }
 
     fn display_name(&self) -> &'static str {
-        DISPLAY_NAME
+        DESCRIPTOR.display_name
+    }
+
+    fn descriptor(&self) -> AdapterDescriptor {
+        DESCRIPTOR
     }
 
     async fn detect(&self) -> Result<DetectionResult, AdapterError> {

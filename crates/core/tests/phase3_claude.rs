@@ -44,17 +44,9 @@ fn core_imports_claude_events_into_shared_queries_and_summary() {
     // Session logs carry no provider, but the model prefix identifies one so the
     // Providers view reflects real usage instead of staying permanently empty.
     assert_eq!(events.events[0].provider_id.as_deref(), Some("anthropic"));
-    let raw_usage = events.events[0]
-        .raw_usage_json
-        .as_ref()
-        .expect("raw Claude usage");
-    assert_eq!(
-        raw_usage
-            .get("input_tokens")
-            .and_then(|value| value.as_u64()),
-        Some(100)
-    );
-    assert!(!raw_usage.to_string().contains("REDACTED_PROMPT"));
+    // The adapter keeps a sanitized usage object in memory, but the Core's
+    // default privacy policy does not persist request metadata to SQLite.
+    assert_eq!(events.events[0].raw_usage_json, None);
 
     let summary = core.quick_summary().expect("QuickSummary");
     assert_eq!(summary.active_app, Some(AppKind::ClaudeCode));

@@ -98,7 +98,7 @@ export function SettingsView() {
     <PageFrame
       eyebrow="Local configuration"
       title="设置"
-      subtitle="Codex 与 Claude Code Session 路径由 Core 持久化并自动增量导入；其他 Adapter 保持 Unavailable。"
+      subtitle="Codex 与 Claude Code Session 路径由 Core 持久化并自动增量导入；OTel 仅在显式配置回环端口后接收。"
     >
       {error ? <p className="notice notice-warning">{error}</p> : null}
       <section className="panel settings-panel" aria-label="应用设置">
@@ -163,6 +163,36 @@ export function SettingsView() {
               browse("file", "选择 Cockpit 数据库", "cockpit_path")
             }
           />
+          <label className="settings-field" htmlFor="settings-otel-port">
+            <span>OTLP HTTP 端口</span>
+            <input
+              id="settings-otel-port"
+              type="number"
+              min={1024}
+              max={65535}
+              inputMode="numeric"
+              value={settings.otel_port ?? ""}
+              onChange={(event) => {
+                const value = event.target.value.trim();
+                const port = value ? Number(value) : null;
+                setSettings({
+                  ...settings,
+                  otel_port:
+                    port !== null &&
+                    Number.isInteger(port) &&
+                    port >= 1024 &&
+                    port <= 65535
+                      ? port
+                      : null,
+                });
+              }}
+              placeholder="留空关闭（仅 127.0.0.1）"
+              title="TokenBuddy 只监听 127.0.0.1，不接受局域网连接；端口被占用时主采集仍会继续。"
+            />
+            <small className="settings-help">
+              可接收 OTLP/HTTP traces；默认关闭，不需要 Collector。
+            </small>
+          </label>
         </div>
         <div className="settings-flags">
           <label>
@@ -183,6 +213,19 @@ export function SettingsView() {
               readOnly
             />
             允许本地代理（Phase 7，当前关闭）
+          </label>
+          <label title="只保存脱敏 usage 字段，不保存 Prompt、Completion 或源代码；关闭后会清除已保存的原始 usage 元数据。">
+            <input
+              type="checkbox"
+              checked={settings.save_request_metadata}
+              onChange={(event) =>
+                setSettings({
+                  ...settings,
+                  save_request_metadata: event.target.checked,
+                })
+              }
+            />
+            保存脱敏 usage 元数据（默认关闭）
           </label>
         </div>
         <button

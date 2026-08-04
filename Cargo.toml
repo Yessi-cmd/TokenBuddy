@@ -8,6 +8,7 @@ members = [
     "crates/adapters/cc-switch",
     "crates/adapters/cockpit",
     "crates/adapters/sqlite-source",
+    "crates/otel-receiver",
     "crates/core",
 ]
 resolver = "3"
@@ -24,13 +25,13 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 sha2 = "0.10.9"
+thiserror = "2.0.17"
 tauri = { version = "2.11.5", features = ["tray-icon", "macos-private-api"] }
 tauri-build = "2.6.3"
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-single-instance = "2.4.3"
 tempfile = "3.23.0"
-thiserror = "2.0.17"
 tokenbuddy-domain = { path = "crates/domain" }
 tokenbuddy-sqlite-source = { path = "crates/adapters/sqlite-source" }
 tokenbuddy-storage = { path = "crates/storage" }

@@ -3931,6 +3931,7 @@ dependencies = [
  "tokenbuddy-cockpit",
  "tokenbuddy-codex-session",
  "tokenbuddy-domain",
+ "tokenbuddy-otel-receiver",
  "tokenbuddy-storage",
 ]
 
@@ -3964,6 +3965,17 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "tokenbuddy-otel-receiver"
+version = "0.1.1"
+dependencies = [
+ "chrono",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
+ "tokenbuddy-domain",
 ]
 
 [[package]]

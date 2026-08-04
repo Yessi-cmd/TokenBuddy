@@ -171,6 +171,7 @@ export interface SourceRecord {
 export interface RescanResult {
   inserted_events: number;
   duplicate_events: number;
+  reconciled_events?: number;
   upserted_sessions: number;
   updated_cursors: number;
   skipped_records: number;
@@ -349,23 +350,12 @@ export function saveExport(
   return invoke<string>("save_export", { format, filters });
 }
 
-// Desktop-only: make the tray popover exactly as tall as its content.
-//
-// The popover window is created at a fixed size because Rust cannot know how
-// tall the summary will render — a missing quota window or an extra warning
-// line changes it. Without this the window keeps its startup height and the
-// surplus shows as dead space below the last row.
-//
-// The window module is imported lazily so a browser build never loads it.
+// Desktop-only: make the tray popover exactly as tall as its content and keep
+// it attached to the tray. Re-anchoring belongs in Rust because Windows opens
+// the panel above the taskbar; changing only the height leaves a gap below it.
 export async function fitQuickWindowToContent(height: number): Promise<void> {
   if (!inTauri()) return;
-  const { getCurrentWindow, LogicalSize } =
-    await import("@tauri-apps/api/window");
-  const window = getCurrentWindow();
-  const size = await window.innerSize();
-  const scale = await window.scaleFactor();
-  const width = size.toLogical(scale).width;
-  await window.setSize(new LogicalSize(width, Math.ceil(height)));
+  await invoke<void>("fit_quick_window_to_content", { height });
 }
 
 // Desktop-only: bring the full dashboard window forward.

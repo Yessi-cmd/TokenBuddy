@@ -20,8 +20,8 @@ use std::{
 };
 
 use tauri::{
-    App, AppHandle, Manager, PhysicalPosition, PhysicalSize, Rect, Runtime, State, WebviewUrl,
-    WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    App, AppHandle, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Rect, Runtime, State,
+    WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
     menu::{MenuBuilder, MenuEvent},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     window::{Effect, EffectState, EffectsBuilder},
@@ -36,6 +36,9 @@ use tokenbuddy_domain::{
     SessionPage, UsageFilters,
 };
 use web::{AutostartCallback, LocalWebApiStatus, LocalWebServer};
+
+const QUICK_WINDOW_MIN_HEIGHT: f64 = 120.0;
+const QUICK_WINDOW_MARGIN: i32 = 8;
 
 struct AppState {
     core: Arc<Core>,
@@ -242,6 +245,100 @@ fn save_export(
 fn show_main_window(app: AppHandle) -> Result<(), String> {
     show_window(&app, "main");
     Ok(())
+}
+
+/// Resize the quick panel after the webview has measured its content, then
+/// re-anchor it to the tray. Windows places the panel above the taskbar, so a
+/// height-only resize would otherwise leave a visible gap below the panel.
+#[tauri::command]
+fn fit_quick_window_to_content(app: AppHandle, height: f64) -> Result<(), String> {
+    if !height.is_finite() || height <= 0.0 {
+        return Err("快速面板高度无效".to_owned());
+    }
+
+    let window = app
+        .get_webview_window("quick")
+        .ok_or_else(|| "快速面板窗口尚未创建".to_owned())?;
+    let scale_factor = window
+        .scale_factor()
+        .map_err(|error| format!("无法读取快速面板缩放比例：{error}"))?;
+    let current_size = window
+        .inner_size()
+        .map_err(|error| format!("无法读取快速面板尺寸：{error}"))?;
+    let current_outer_size = window.outer_size().unwrap_or(current_size);
+    let width = current_size.to_logical(scale_factor).width;
+    let anchor = tray_rect(&app);
+    let target_monitor = anchor
+        .map(|anchor| anchor.position.to_physical::<i32>(scale_factor))
+        .and_then(|position| {
+            app.monitor_from_point(f64::from(position.x), f64::from(position.y))
+                .ok()
+                .flatten()
+        })
+        .or_else(|| window.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let maximum_height = target_monitor.as_ref().and_then(|monitor| {
+        max_quick_inner_height(
+            monitor.work_area().size.height,
+            current_size.height,
+            current_outer_size.height,
+            scale_factor,
+            monitor.scale_factor(),
+        )
+    });
+    let height = fitted_quick_height(height, maximum_height);
+
+    window
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|error| format!("无法调整快速面板尺寸：{error}"))?;
+    if let Some(anchor) = anchor {
+        position_quick_window(&app, &window, anchor);
+    }
+    Ok(())
+}
+
+fn fitted_quick_height(requested_height: f64, maximum_height: Option<f64>) -> f64 {
+    let requested_height = requested_height.ceil().max(QUICK_WINDOW_MIN_HEIGHT);
+    maximum_height
+        .filter(|height| height.is_finite() && *height > 0.0)
+        .map_or(requested_height, |maximum_height| {
+            requested_height.min(maximum_height.max(QUICK_WINDOW_MIN_HEIGHT))
+        })
+}
+
+fn max_quick_inner_height(
+    work_area_height: u32,
+    current_inner_height: u32,
+    current_outer_height: u32,
+    current_scale: f64,
+    target_scale: f64,
+) -> Option<f64> {
+    if !valid_scale_factor(current_scale) || !valid_scale_factor(target_scale) {
+        return None;
+    }
+
+    let frame_height =
+        f64::from(current_outer_height.saturating_sub(current_inner_height)) / current_scale;
+    let work_area_height = f64::from(work_area_height) / target_scale;
+    let margin_height = f64::from(QUICK_WINDOW_MARGIN.saturating_mul(2)) / target_scale;
+    let maximum_height = (work_area_height - frame_height - margin_height).floor();
+    (maximum_height.is_finite() && maximum_height > 0.0).then_some(maximum_height)
+}
+
+fn valid_scale_factor(scale_factor: f64) -> bool {
+    scale_factor.is_finite() && scale_factor > 0.0
+}
+
+fn physical_size_at_scale(
+    size: PhysicalSize<u32>,
+    current_scale: f64,
+    target_scale: f64,
+) -> PhysicalSize<u32> {
+    if !valid_scale_factor(current_scale) || !valid_scale_factor(target_scale) {
+        return size;
+    }
+    size.to_logical::<f64>(current_scale)
+        .to_physical::<u32>(target_scale)
 }
 
 #[tauri::command]
@@ -677,18 +774,27 @@ fn position_quick_window<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<
     let scale_factor = window.scale_factor().unwrap_or(1.0);
     let anchor_position = anchor.position.to_physical::<i32>(scale_factor);
     let anchor_size = anchor.size.to_physical::<u32>(scale_factor);
-    let panel_size = window
+    let monitor = app
+        .monitor_from_point(f64::from(anchor_position.x), f64::from(anchor_position.y))
+        .ok()
+        .flatten();
+    let current_panel_size = window
         .outer_size()
         .unwrap_or_else(|_| PhysicalSize::new(320, 500));
-    let origin = popover_origin(anchor_position, anchor_size, panel_size);
+    let panel_size = monitor.as_ref().map_or(current_panel_size, |monitor| {
+        physical_size_at_scale(current_panel_size, scale_factor, monitor.scale_factor())
+    });
+    let work_area = monitor.as_ref().map(|monitor| {
+        let work_area = monitor.work_area();
+        (work_area.position, work_area.size)
+    });
+    let origin = popover_origin(anchor_position, anchor_size, panel_size, work_area);
     let mut x = origin.x;
     let mut y = origin.y;
 
-    if let Ok(Some(monitor)) =
-        app.monitor_from_point(f64::from(anchor_position.x), f64::from(anchor_position.y))
-    {
+    if let Some(monitor) = monitor {
         let work_area = monitor.work_area();
-        let margin = 8;
+        let margin = QUICK_WINDOW_MARGIN;
         let work_width = i32::try_from(work_area.size.width).unwrap_or(i32::MAX);
         let work_height = i32::try_from(work_area.size.height).unwrap_or(i32::MAX);
         let panel_width = i32::try_from(panel_size.width).unwrap_or(i32::MAX);
@@ -708,17 +814,52 @@ fn popover_origin(
     anchor_position: PhysicalPosition<i32>,
     anchor_size: PhysicalSize<u32>,
     panel_size: PhysicalSize<u32>,
+    work_area: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
 ) -> PhysicalPosition<i32> {
     let anchor_width = i32::try_from(anchor_size.width).unwrap_or(i32::MAX);
     let panel_width = i32::try_from(panel_size.width).unwrap_or(i32::MAX);
-    #[cfg(target_os = "windows")]
     let panel_height = i32::try_from(panel_size.height).unwrap_or(i32::MAX);
     let x = anchor_position.x + (anchor_width - panel_width) / 2;
-    #[cfg(target_os = "windows")]
-    let y = anchor_position.y - panel_height - 8;
-    #[cfg(not(target_os = "windows"))]
-    let y = anchor_position.y + i32::try_from(anchor_size.height).unwrap_or(i32::MAX) + 8;
+    let anchor_height = i32::try_from(anchor_size.height).unwrap_or(i32::MAX);
+    let above = anchor_position
+        .y
+        .saturating_sub(panel_height)
+        .saturating_sub(QUICK_WINDOW_MARGIN);
+    let below = anchor_position
+        .y
+        .saturating_add(anchor_height)
+        .saturating_add(QUICK_WINDOW_MARGIN);
+    let y = if cfg!(target_os = "windows") {
+        popover_y(above, below, panel_height, work_area)
+    } else {
+        below
+    };
     PhysicalPosition::new(x, y)
+}
+
+fn popover_y(
+    above: i32,
+    below: i32,
+    panel_height: i32,
+    work_area: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
+) -> i32 {
+    let Some((work_position, work_size)) = work_area else {
+        return above;
+    };
+    let work_top = work_position.y;
+    let work_bottom = work_position
+        .y
+        .saturating_add(i32::try_from(work_size.height).unwrap_or(i32::MAX));
+    let fits_above = above >= work_top;
+    let fits_below = below <= work_bottom.saturating_sub(panel_height);
+
+    if fits_above {
+        above
+    } else if fits_below {
+        below
+    } else {
+        above
+    }
 }
 
 fn update_tray_summary<R: Runtime>(app: &AppHandle<R>, summary: &QuickSummary) {
@@ -916,6 +1057,7 @@ pub fn run() {
             export_usage,
             save_export,
             show_main_window,
+            fit_quick_window_to_content,
             list_sessions,
             get_session_detail,
             list_usage_events,
@@ -965,7 +1107,8 @@ mod tests {
     use tauri::{PhysicalPosition, PhysicalSize};
 
     use super::{
-        debug_show_windows, greet, next_window_visible, normalized_path, popover_origin,
+        debug_show_windows, fitted_quick_height, greet, max_quick_inner_height,
+        next_window_visible, normalized_path, physical_size_at_scale, popover_origin, popover_y,
         should_dismiss_quick_window, tray_tooltip,
     };
 
@@ -1028,12 +1171,50 @@ mod tests {
             PhysicalPosition::new(1_000, 0),
             PhysicalSize::new(22, 24),
             PhysicalSize::new(360, 540),
+            None,
         );
         assert_eq!(origin.x, 831);
         #[cfg(not(target_os = "windows"))]
         assert_eq!(origin.y, 32);
         #[cfg(target_os = "windows")]
         assert_eq!(origin.y, -548);
+    }
+
+    #[test]
+    fn windows_popover_moves_below_a_top_taskbar_when_above_does_not_fit() {
+        let work_area = Some((PhysicalPosition::new(0, 0), PhysicalSize::new(1920, 1080)));
+
+        assert_eq!(popover_y(-528, 52, 540, work_area), 52);
+    }
+
+    #[test]
+    fn windows_popover_stays_above_a_bottom_taskbar_when_both_sides_are_available() {
+        let work_area = Some((PhysicalPosition::new(0, 0), PhysicalSize::new(1920, 1080)));
+
+        assert_eq!(popover_y(452, 1_032, 540, work_area), 452);
+    }
+
+    #[test]
+    fn tray_popover_uses_the_target_monitor_scale_for_placement() {
+        assert_eq!(
+            physical_size_at_scale(PhysicalSize::new(320, 420), 1.0, 1.5),
+            PhysicalSize::new(480, 630)
+        );
+        assert_eq!(
+            physical_size_at_scale(PhysicalSize::new(480, 630), 1.5, 1.0),
+            PhysicalSize::new(320, 420)
+        );
+    }
+
+    #[test]
+    fn quick_panel_height_is_capped_to_the_target_work_area() {
+        let maximum = max_quick_inner_height(600, 420, 432, 1.0, 1.5);
+
+        assert_eq!(maximum, Some(377.0));
+        assert_eq!(fitted_quick_height(800.0, maximum), 377.0);
+        assert_eq!(fitted_quick_height(300.0, maximum), 300.0);
+        assert_eq!(fitted_quick_height(40.0, maximum), 120.0);
+        assert_eq!(fitted_quick_height(800.0, None), 800.0);
     }
 
     #[test]

@@ -76,6 +76,17 @@ describe("api transport", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("resizes and re-anchors the quick panel through Tauri IPC", async () => {
+    useDesktopRuntime();
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    await api.fitQuickWindowToContent(372);
+
+    expect(invoke).toHaveBeenCalledWith("fit_quick_window_to_content", {
+      height: 372,
+    });
+  });
+
   it("turns a failed response into an error instead of returning its body", async () => {
     vi.stubGlobal(
       "fetch",

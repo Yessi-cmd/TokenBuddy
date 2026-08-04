@@ -27,8 +27,9 @@ use chrono::{DateTime, Duration, Utc};
 use rusqlite::Connection;
 use thiserror::Error;
 use tokenbuddy_domain::{
-    AccountActivityWindow, AccountRecord, AppKind, DetectionResult, ImportBatch, ImportCursor,
-    LauncherKind, ProviderRecord, SourceHealth, SourceRecord, account_fingerprint,
+    AccountActivityWindow, AccountRecord, AdapterCapabilities, AdapterDescriptor, AppKind,
+    DetectionResult, ImportBatch, ImportCursor, LauncherKind, ProviderRecord, SourceHealth,
+    SourceRecord, account_fingerprint,
 };
 use tokenbuddy_sqlite_source::{
     column_names, column_set, epoch_to_utc, int_col, open_read_only, string_col, table_exists,
@@ -40,6 +41,19 @@ pub const SOURCE_ID: &str = "cockpit";
 pub const ADAPTER_TYPE: &str = "cockpit";
 /// Name shown in the UI.
 pub const DISPLAY_NAME: &str = "Cockpit Tools";
+/// Static capabilities advertised to the Core registry.
+pub const DESCRIPTOR: AdapterDescriptor = AdapterDescriptor {
+    id: SOURCE_ID,
+    adapter_type: ADAPTER_TYPE,
+    display_name: DISPLAY_NAME,
+    capabilities: AdapterCapabilities {
+        usage_events: false,
+        provider_context: true,
+        quota_snapshots: false,
+        file_watch: false,
+    },
+    read_only: true,
+};
 /// Cockpit's request-log database file name.
 pub const DB_FILENAME: &str = "codex_local_access_logs.sqlite";
 /// Cockpit's data directory inside the user's home.
@@ -156,9 +170,9 @@ impl CockpitAdapter {
     fn source_record(&self, status: &str) -> SourceRecord {
         let timestamp = now();
         SourceRecord {
-            id: SOURCE_ID.to_owned(),
-            adapter_type: ADAPTER_TYPE.to_owned(),
-            display_name: DISPLAY_NAME.to_owned(),
+            id: DESCRIPTOR.id.to_owned(),
+            adapter_type: DESCRIPTOR.adapter_type.to_owned(),
+            display_name: DESCRIPTOR.display_name.to_owned(),
             path_or_endpoint: Some(self.db_path.to_string_lossy().into_owned()),
             enabled: true,
             detected_version: Some("sqlite".to_owned()),

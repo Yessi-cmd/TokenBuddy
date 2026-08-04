@@ -244,6 +244,7 @@ export function DashboardView() {
         rescanCockpit(cockpitDb.trim() || null),
       ]);
     let inserted = 0;
+    let reconciled = 0;
     let skipped = 0;
     const problems: string[] = [];
     for (const [label, outcome] of [
@@ -254,6 +255,7 @@ export function DashboardView() {
     ] as const) {
       if (outcome.status === "fulfilled") {
         inserted += outcome.value.inserted_events;
+        reconciled += outcome.value.reconciled_events ?? 0;
         skipped += outcome.value.skipped_records;
         if (outcome.value.warning) {
           problems.push(`${label}：${outcome.value.warning}`);
@@ -263,7 +265,9 @@ export function DashboardView() {
         problems.push(`${label} 扫描失败：${describeError(outcome.reason)}`);
       }
     }
-    setStatus(`扫描完成：新增 ${inserted} 条事件，跳过 ${skipped} 条记录`);
+    setStatus(
+      `扫描完成：新增 ${inserted} 条事件，校正 ${reconciled} 条，跳过 ${skipped} 条记录`,
+    );
     setActionError(problems.length ? problems.join("；") : null);
     setRefreshVersion((value) => value + 1);
     setIsScanning(false);
@@ -312,6 +316,10 @@ export function DashboardView() {
     }
   }
 
+  const hasSourceDetections = Boolean(
+    codexDetection || claudeDetection || ccSwitchDetection || cockpitDetection,
+  );
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -350,7 +358,7 @@ export function DashboardView() {
       {error ? <p className="notice notice-warning">{error}</p> : null}
 
       <section className="source-bar" aria-labelledby="source-heading">
-        <div>
+        <div className="source-description-block">
           <p className="section-kicker" id="source-heading">
             数据源
           </p>
@@ -413,42 +421,47 @@ export function DashboardView() {
             检测 Cockpit
           </button>
         </div>
-        <div className="source-detections">
-          {codexDetection ? (
-            <span
-              className={codexDetection.detected ? "detection ok" : "detection"}
-            >
-              Codex {codexDetection.detected ? "Detected" : "Not found"}
-            </span>
-          ) : null}
-          {claudeDetection ? (
-            <span
-              className={
-                claudeDetection.detected ? "detection ok" : "detection"
-              }
-            >
-              Claude {claudeDetection.detected ? "Detected" : "Not found"}
-            </span>
-          ) : null}
-          {ccSwitchDetection ? (
-            <span
-              className={
-                ccSwitchDetection.detected ? "detection ok" : "detection"
-              }
-            >
-              CC-Switch {ccSwitchDetection.detected ? "Detected" : "Not found"}
-            </span>
-          ) : null}
-          {cockpitDetection ? (
-            <span
-              className={
-                cockpitDetection.detected ? "detection ok" : "detection"
-              }
-            >
-              Cockpit {cockpitDetection.detected ? "Detected" : "Not found"}
-            </span>
-          ) : null}
-        </div>
+        {hasSourceDetections ? (
+          <div className="source-detections">
+            {codexDetection ? (
+              <span
+                className={
+                  codexDetection.detected ? "detection ok" : "detection"
+                }
+              >
+                Codex {codexDetection.detected ? "Detected" : "Not found"}
+              </span>
+            ) : null}
+            {claudeDetection ? (
+              <span
+                className={
+                  claudeDetection.detected ? "detection ok" : "detection"
+                }
+              >
+                Claude {claudeDetection.detected ? "Detected" : "Not found"}
+              </span>
+            ) : null}
+            {ccSwitchDetection ? (
+              <span
+                className={
+                  ccSwitchDetection.detected ? "detection ok" : "detection"
+                }
+              >
+                CC-Switch{" "}
+                {ccSwitchDetection.detected ? "Detected" : "Not found"}
+              </span>
+            ) : null}
+            {cockpitDetection ? (
+              <span
+                className={
+                  cockpitDetection.detected ? "detection ok" : "detection"
+                }
+              >
+                Cockpit {cockpitDetection.detected ? "Detected" : "Not found"}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
       </section>
 
       <section

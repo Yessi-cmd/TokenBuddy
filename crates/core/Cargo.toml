@@ -15,6 +15,7 @@ tokenbuddy-cc-switch = { path = "../adapters/cc-switch" }
 tokenbuddy-cockpit = { path = "../adapters/cockpit" }
 tokenbuddy-domain.workspace = true
 tokenbuddy-storage.workspace = true
+tokenbuddy-otel-receiver = { path = "../otel-receiver" }
 
 [dev-dependencies]
 # Building read-only fixtures for the launcher adapters' own databases.

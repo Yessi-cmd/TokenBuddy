@@ -1998,12 +1998,12 @@ T001 至 T014 是本计划最初定义的第一批任务编号，并不是全部
 [x] Phase 4b 正确性与 MVP 补全：QuickSummary Core 边界、部分 JSONL 行重试、缺失值聚合、筛选与 CSV/JSON 导出、单实例、自启动和按需 WebView
 [x] Phase 4b 路径选择与 Codex 官方账号：原生目录/文件选择器、`auth.json` 账号身份、官方额度窗口入库
 [ ] Phase 4b 跨平台真机交互补验：Windows 托盘与 macOS/Windows 菜单栏或托盘交互、隐藏窗口持续采集和 Windows CPU/P95
-[ ] Phase 5：OTel
+[x] Phase 5：OTel（可选回环 OTLP/HTTP traces receiver、Core 集成、跨来源关联与优先级去重）
 [x] Phase 6：CC Switch / Cockpit（只读 Adapter、Provider/账号归因、Codex 官方额度；代理 usage 导入按防重复计数原则不实现）
 [ ] Phase 7：可选本地代理
 ```
 
-最近更新：2026-07-26
+最近更新：2026-08-04
 
 Phase 0 已完成：Tauri 2 + React + TypeScript 桌面壳、Rust workspace、格式化/lint/test/build 命令和 macOS/Windows CI 配置均已建立。Windows 构建仍需在远程 GitHub Actions 环境中执行确认。
 
@@ -2026,3 +2026,9 @@ Phase 6 与路径选择补全已完成：CC Switch 与 Cockpit 只读 Adapter �
 多账号轮换保护与发布流程已加入：检测到 CC Switch 或 Cockpit 数据库时，Codex 适配器仍上报 `auth.json` 中的官方账号身份，但不再把该账号写入 usage 事件、也不产出额度快照——启动器在多个账号间轮换时，`auth.json` 只描述此刻登录的账号，按它归因会把其他账号的历史算到当前账号头上。判定刻意保守：丢失一次归因可以补回，发布一个错误归因不可以。真正的多账号归因需从 Cockpit `request_logs` 的 `account_id` / `email` 按时间窗关联，尚未实现。同时新增 `.github/workflows/release.yml`，由 `windows-latest` 与 `macos-15` 在 `v*` tag 上产出 `.msi` / `-setup.exe` / `.dmg` 并发布为 pre-release；安装包未签名，Windows 托盘、自启动与路径选择器仍未在真机验证。
 
 Cockpit 多账号归因已完成：Cockpit `request_logs` 的 `account_id` / `email` 现在产出独立账号行与「账号活动时间窗」，Codex 用量事件按发生时刻落到当时实际服务它的账号上，精度 `Correlated`（§17.2）；启动器扫描之前导入的历史事件会被回填，包括原本落在会话日志占位账号里的那些。请求间隔超过 30 分钟断开窗口，窗口前后各留 60 秒余量；两个账号的窗口覆盖同一时刻时保持占位账号，不做二选一。回填只改写空账号与 `auth_mode = 'session_log'` 的占位账号，其他来源已解析的真实账号不动。Cockpit 依然不产出 usage 事件（§6.1）。仍未实现：轮换环境下的官方额度归属（`QuotaSnapshot.account_id` 需改为可选并复用同一套时间窗解析）、CC-Switch 的账号列接入、窗口阈值的真实数据标定。
+
+Windows UI 回归修复已完成（2026-07-29）：快速面板在内容高度变化后会重新锚定托盘，根据显示器工作区在顶部/底部任务栏之间选择可见位置，并按目标显示器 DPI 计算物理尺寸；面板高度受工作区约束，内容过长时可纵向滚动。主面板数据源路径控件改为窄窗口友好的网格布局，长 Windows 路径可收缩，空检测结果不再占行，WebView2 不支持磨砂时有实色回退。前端测试、构建、lint、格式检查、Rust workspace 测试和 clippy 已通过；Windows MSVC 构建、托盘交互、高 DPI 与隐藏窗口持续采集仍需 Windows CI/真机补验，因此“Phase 4b 跨平台真机交互补验”保持未完成。
+
+Adapter descriptor 与隐私默认值硬化已完成（2026-08-04）：Codex、Claude Code、CC Switch 和 Cockpit 均声明集中式 `AdapterDescriptor`，Core 维护统一 Adapter catalog，并明确外部 Adapter 的只读边界，描述每个来源是否提供 usage、Provider/account context、quota 和文件监听能力；错误状态也从 descriptor 生成，避免源信息散落在 Core 分支中。`save_request_metadata` 现在是真正的显式 opt-in：默认导入不把脱敏 `raw_usage_json` 写入 SQLite，关闭设置时会清除历史原始 usage 元数据，normalized token、归因和精度事实保持不变；设置页提供明确的开关和删除提示。OTel Receiver 的具体实现与状态在后续 Phase 5 条目中维护。
+
+Phase 5 OTel 与跨来源关联已完成（2026-08-04）：新增独立 `tokenbuddy-otel-receiver`，只监听 `127.0.0.1` 的 OTLP/HTTP `/v1/traces`，支持 protobuf/JSON，提取 `gen_ai.*` 与兼容别名中的数值 usage、request/response/session/model/provider 和延迟状态；原始请求正文、completion、未知属性和凭据不会进入默认持久化路径。OTel 通过 Core 的同一导入锁、SQLite 事务、QuickSummary 和查询服务入库，端口可留空关闭，端口冲突只产生 warning，不阻塞主应用。新增 `correlation_key` 及 source/precision precedence，同一 request/response 的 OTel、Session 等观察只保留更强事实并报告校正数，Otel-only span 也会生成无正文会话元数据。当前限制是仅支持 HTTP traces，不支持 OTLP gRPC/metrics/logs；缺少 app identity 的 span 保持 `unknown`，本地 Proxy 仍未实现；Windows 托盘和运行时验收仍待 Windows CI/真机。

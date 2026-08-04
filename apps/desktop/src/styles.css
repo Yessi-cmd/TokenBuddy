@@ -1,6 +1,7 @@
 :root {
   color: #e8efe8;
   background: #0c1716;
+  color-scheme: dark;
   font-family:
     Inter,
     ui-sans-serif,
@@ -48,11 +49,24 @@ body {
 html.quick-window,
 body.quick-window {
   min-width: 0;
+  min-height: 0;
   background: transparent;
 }
 
-body.quick-window {
+html.quick-window {
+  height: 100%;
   overflow: hidden;
+}
+
+body.quick-window {
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.quick-window #root {
+  min-height: 0;
+  height: auto;
 }
 
 button,
@@ -264,6 +278,7 @@ h3 {
 
 .source-bar {
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 24px;
   margin-bottom: 18px;
   padding: 16px 18px;
@@ -333,9 +348,18 @@ h3 {
   font-size: 0.78rem;
 }
 
+.source-description-block {
+  flex: 0 1 300px;
+  min-width: min(100%, 230px);
+}
+
 .source-controls {
+  display: grid;
+  flex: 1 1 640px;
+  min-width: 0;
+  align-items: center;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
   justify-content: flex-end;
-  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -345,10 +369,12 @@ h3 {
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .source-controls input {
-  width: min(280px, 32vw);
+  width: auto;
+  min-width: 0;
   padding: 9px 11px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -358,6 +384,8 @@ h3 {
 }
 
 .source-detections {
+  flex: 1 1 100%;
+  min-width: 0;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -559,6 +587,7 @@ h3 {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .settings-field-input .quiet-button {
@@ -575,6 +604,17 @@ h3 {
   color: var(--mint);
   background: rgba(7, 17, 16, 0.45);
   font-size: 0.78rem;
+}
+
+.settings-help {
+  color: var(--quiet);
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
+.settings-field-input input {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .settings-flags {
@@ -892,13 +932,19 @@ h3 {
     flex-direction: column;
   }
 
+  .source-description-block,
+  .source-controls {
+    width: 100%;
+    flex: 0 1 auto;
+  }
+
   .topbar-actions,
   .source-controls {
     justify-content: flex-start;
   }
 
   .source-controls input {
-    width: min(360px, 60vw);
+    width: auto;
   }
 
   .workspace-grid {
@@ -929,7 +975,7 @@ h3 {
 
   .source-controls {
     align-items: stretch;
-    flex-direction: column;
+    grid-template-columns: 1fr;
     width: 100%;
   }
 
@@ -997,6 +1043,7 @@ h3 {
      (see QuickSummaryView), so stretching to 100vh here would paint the
      surface over whatever empty space the window happened to start with. */
   height: auto;
+  width: 100%;
   min-height: 0;
   padding: 0;
   overflow: hidden;
@@ -1012,10 +1059,22 @@ h3 {
   flex-direction: column;
   gap: 1px;
   height: auto;
+  width: 100%;
   padding: 6px 7px 7px;
+  border: 1px solid rgba(60, 60, 67, 0.16);
+  border-radius: 10px;
   color: var(--menu-fg);
   background: var(--menu-surface);
   backdrop-filter: blur(24px) saturate(180%);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.18);
+}
+
+/* WebView2 can run without a usable backdrop-filter implementation on older
+   Windows installations. Keep the panel opaque and readable in that case. */
+@supports not (backdrop-filter: blur(1px)) {
+  .menu-surface {
+    background: #f6f6f4;
+  }
 }
 
 .menu-header {
@@ -1196,7 +1255,7 @@ h3 {
   border-radius: 6px;
   color: var(--menu-fg);
   background: transparent;
-  cursor: default;
+  cursor: pointer;
   font-size: 0.82rem;
   font-weight: 400;
   text-align: left;
@@ -1223,7 +1282,20 @@ h3 {
     --menu-surface: rgba(38, 38, 40, 0.6);
   }
 
+  .menu-surface {
+    border-color: rgba(255, 255, 255, 0.12);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.42);
+  }
+
   .menu-status {
     color: #4ad06f;
+  }
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  @media (prefers-color-scheme: dark) {
+    .menu-surface {
+      background: #262628;
+    }
   }
 }

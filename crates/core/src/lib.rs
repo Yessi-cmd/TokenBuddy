@@ -20,29 +20,42 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokenbuddy_cc_switch::{
-    ADAPTER_TYPE as CC_SWITCH_ADAPTER_TYPE, CcSwitchAdapter,
-    DISPLAY_NAME as CC_SWITCH_DISPLAY_NAME, SOURCE_ID as CC_SWITCH_SOURCE_ID,
+    CcSwitchAdapter, DESCRIPTOR as CC_SWITCH_DESCRIPTOR, SOURCE_ID as CC_SWITCH_SOURCE_ID,
 };
 use tokenbuddy_claude_session::{
-    ADAPTER_TYPE as CLAUDE_ADAPTER_TYPE, ClaudeSessionAdapter, DISPLAY_NAME as CLAUDE_DISPLAY_NAME,
-    SOURCE_ID as CLAUDE_SOURCE_ID,
+    ClaudeSessionAdapter, DESCRIPTOR as CLAUDE_DESCRIPTOR, SOURCE_ID as CLAUDE_SOURCE_ID,
 };
 use tokenbuddy_cockpit::{
-    ADAPTER_TYPE as COCKPIT_ADAPTER_TYPE, CockpitAdapter, DISPLAY_NAME as COCKPIT_DISPLAY_NAME,
-    SOURCE_ID as COCKPIT_SOURCE_ID,
+    CockpitAdapter, DESCRIPTOR as COCKPIT_DESCRIPTOR, SOURCE_ID as COCKPIT_SOURCE_ID,
 };
 use tokenbuddy_codex_session::{
-    ADAPTER_TYPE as CODEX_ADAPTER_TYPE, CodexSessionAdapter, DISPLAY_NAME as CODEX_DISPLAY_NAME,
-    SOURCE_ID as CODEX_SOURCE_ID,
+    CodexSessionAdapter, DESCRIPTOR as CODEX_DESCRIPTOR, SOURCE_ID as CODEX_SOURCE_ID,
 };
 use tokenbuddy_domain::{
-    AppSettings, CollectionStatus, DashboardSummary, DetectionResult, ExportResult, ImportBatch,
-    QuickSummary, SessionDetail, SessionPage, SourceRecord, UsageAdapter, UsageEventPage,
-    UsageFilters,
+    AdapterDescriptor, AppSettings, CollectionStatus, DashboardSummary, DetectionResult,
+    ExportResult, ImportBatch, QuickSummary, SessionDetail, SessionPage, SourceRecord,
+    UsageAdapter, UsageEventPage, UsageFilters,
+};
+use tokenbuddy_otel_receiver::{
+    BatchSink as OtelBatchSink, DESCRIPTOR as OTEL_DESCRIPTOR, OtelReceiver,
 };
 use tokenbuddy_storage::{Database, ImportStats, StorageError};
 
 type SummaryListener = Arc<dyn Fn(QuickSummary) + Send + Sync>;
+
+/// The registered source adapters and their declared capabilities.
+///
+/// Keeping this catalog in one place gives diagnostics and future OTel/proxy
+/// registration a single source of truth, while each adapter still owns its
+/// schema and import implementation. A descriptor never implies that the
+/// source is installed; runtime detection remains in `SourceRecord`.
+pub const ADAPTER_DESCRIPTORS: &[AdapterDescriptor] = &[
+    CODEX_DESCRIPTOR,
+    CLAUDE_DESCRIPTOR,
+    CC_SWITCH_DESCRIPTOR,
+    COCKPIT_DESCRIPTOR,
+    OTEL_DESCRIPTOR,
+];
 
 /// How to start the Core.
 ///
@@ -141,6 +154,8 @@ pub struct ImportReport {
     pub inserted_events: u64,
     /// Events already present, recognised by their hash.
     pub duplicate_events: u64,
+    /// Lower-priority observations replaced by a stronger correlated source.
+    pub reconciled_events: u64,
     /// Sessions created or refreshed.
     pub upserted_sessions: u64,
     /// Cursors advanced.
@@ -162,6 +177,7 @@ impl From<ImportStats> for ImportReport {
         Self {
             inserted_events: stats.inserted_events,
             duplicate_events: stats.duplicate_events,
+            reconciled_events: stats.reconciled_events,
             upserted_sessions: stats.upserted_sessions,
             updated_cursors: stats.updated_cursors,
             upserted_accounts: stats.upserted_accounts,
@@ -230,6 +246,9 @@ pub struct Core {
     summary_listeners: Mutex<Vec<SummaryListener>>,
     control: Arc<CoreControl>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    otel_receiver: Mutex<Option<OtelReceiver>>,
+    otel_sink: Mutex<Option<OtelBatchSink>>,
+    otel_warning: RwLock<Option<String>>,
 }
 
 impl Core {
@@ -295,7 +314,30 @@ impl Core {
             summary_listeners: Mutex::new(Vec::new()),
             control: Arc::clone(&control),
             worker: Mutex::new(None),
+            otel_receiver: Mutex::new(None),
+            otel_sink: Mutex::new(None),
+            otel_warning: RwLock::new(None),
         });
+
+        // The receiver callback only holds a Weak Core reference. It therefore
+        // cannot keep the application alive after the desktop shell exits, and
+        // all OTel writes still pass through the Core's single import boundary.
+        let weak_core = Arc::downgrade(&core);
+        let sink: OtelBatchSink = Arc::new(move |batch| {
+            if let Some(core) = weak_core.upgrade()
+                && let Err(error) = core.ingest_otel_batch(batch)
+            {
+                eprintln!("TokenBuddy OTel batch was not stored: {error}");
+            }
+        });
+        core.otel_sink
+            .lock()
+            .map_err(|_| CoreError::Lock("OTel sink"))?
+            .replace(sink);
+        // OTel is optional. A busy or invalid port must leave the normal Core
+        // and file-backed statistics usable; the warning is retained for the
+        // next QuickSummary refresh instead of aborting startup.
+        core.reconfigure_otel(settings.otel_port)?;
 
         // Do one synchronous pass so the tray summary is useful immediately;
         // subsequent passes are owned by the one worker below.
@@ -335,6 +377,21 @@ impl Core {
             .read()
             .map(|summary| summary.clone())
             .map_err(|_| CoreError::Lock("summary"))
+    }
+
+    /// The static adapter catalog shared by diagnostics and future source
+    /// configuration surfaces.
+    pub fn adapter_descriptors(&self) -> &'static [AdapterDescriptor] {
+        ADAPTER_DESCRIPTORS
+    }
+
+    /// The active local OTLP endpoint, or `None` when OTel is disabled or the
+    /// configured port could not be bound.
+    pub fn otel_endpoint(&self) -> Result<Option<String>, CoreError> {
+        self.otel_receiver
+            .lock()
+            .map(|receiver| receiver.as_ref().map(|value| value.endpoint().to_owned()))
+            .map_err(|_| CoreError::Lock("OTel receiver"))
     }
 
     /// Register a callback invoked whenever the summary actually changes.
@@ -548,6 +605,9 @@ impl Core {
             .write()
             .map_err(|_| CoreError::Lock("Cockpit database"))? =
             settings.cockpit_path.map(PathBuf::from);
+        // Binding is deliberately best-effort: a port collision must not make
+        // the normal file-backed collectors or the settings page unusable.
+        self.reconfigure_otel(settings.otel_port)?;
         self.control.wake();
         Ok(())
     }
@@ -737,6 +797,12 @@ impl Core {
     /// Safe to call more than once; the second call is a no-op.
     pub fn shutdown(&self) -> Result<(), CoreError> {
         self.control.request_stop();
+        let receiver = self
+            .otel_receiver
+            .lock()
+            .map_err(|_| CoreError::Lock("OTel receiver"))?
+            .take();
+        drop(receiver);
         let worker = self
             .worker
             .lock()
@@ -746,6 +812,33 @@ impl Core {
             worker.join().map_err(|_| CoreError::WorkerDidNotStop)?;
         }
         Ok(())
+    }
+
+    /// Accept one already-normalized OTel batch from the optional receiver.
+    ///
+    /// This path shares the same import lock and storage transaction as JSONL
+    /// adapters, so a span arriving while a file rescan is running cannot
+    /// interleave writes or bypass source precedence and idempotence.
+    pub fn ingest_otel_batch(&self, batch: ImportBatch) -> Result<ImportReport, CoreError> {
+        let _import_guard = self
+            .import_lock
+            .lock()
+            .map_err(|_| CoreError::Lock("import"))?;
+        let mut state = RefreshState::default();
+        self.apply_batch("OTel", batch, &mut state)?;
+        self.set_otel_warning(None)?;
+        let warning = (!state.warnings.is_empty()).then(|| state.warnings.join("；"));
+        state.report.warning = warning.clone();
+        drop(_import_guard);
+        self.refresh_summary(
+            if state.has_error {
+                CollectionStatus::Error
+            } else {
+                CollectionStatus::Collecting
+            },
+            warning,
+        )?;
+        Ok(state.report)
     }
 
     fn database_lock(&self) -> Result<std::sync::MutexGuard<'_, Database>, CoreError> {
@@ -777,6 +870,16 @@ impl Core {
             .lock()
             .map_err(|_| CoreError::Lock("import"))?;
         let mut state = RefreshState::default();
+
+        if let Some(warning) = self
+            .otel_warning
+            .read()
+            .map_err(|_| CoreError::Lock("OTel warning"))?
+            .clone()
+        {
+            state.has_error = true;
+            state.warnings.push(warning);
+        }
 
         match self.codex_home()? {
             Some(home) => self.import_codex(home, &mut state)?,
@@ -853,13 +956,7 @@ impl Core {
                 let message = format!("Codex 导入失败：{error}");
                 state.has_error = true;
                 state.warnings.push(message.clone());
-                self.record_source_error(
-                    CODEX_SOURCE_ID,
-                    CODEX_ADAPTER_TYPE,
-                    CODEX_DISPLAY_NAME,
-                    codex_home,
-                    message,
-                )
+                self.record_source_error(CODEX_DESCRIPTOR, codex_home, message)
             }
         }
     }
@@ -877,13 +974,7 @@ impl Core {
                 let message = format!("Claude Code 导入失败：{error}");
                 state.has_error = true;
                 state.warnings.push(message.clone());
-                self.record_source_error(
-                    CLAUDE_SOURCE_ID,
-                    CLAUDE_ADAPTER_TYPE,
-                    CLAUDE_DISPLAY_NAME,
-                    claude_home,
-                    message,
-                )
+                self.record_source_error(CLAUDE_DESCRIPTOR, claude_home, message)
             }
         }
     }
@@ -903,13 +994,7 @@ impl Core {
                 let message = format!("CC-Switch 导入失败：{error}");
                 state.has_error = true;
                 state.warnings.push(message.clone());
-                self.record_source_error(
-                    CC_SWITCH_SOURCE_ID,
-                    CC_SWITCH_ADAPTER_TYPE,
-                    CC_SWITCH_DISPLAY_NAME,
-                    db_path,
-                    message,
-                )
+                self.record_source_error(CC_SWITCH_DESCRIPTOR, db_path, message)
             }
         }
     }
@@ -929,13 +1014,7 @@ impl Core {
                 let message = format!("Cockpit 导入失败：{error}");
                 state.has_error = true;
                 state.warnings.push(message.clone());
-                self.record_source_error(
-                    COCKPIT_SOURCE_ID,
-                    COCKPIT_ADAPTER_TYPE,
-                    COCKPIT_DISPLAY_NAME,
-                    db_path,
-                    message,
-                )
+                self.record_source_error(COCKPIT_DESCRIPTOR, db_path, message)
             }
         }
     }
@@ -962,6 +1041,7 @@ impl Core {
         let stats = self.database_lock()?.apply_import_batch(&batch)?;
         state.report.inserted_events += stats.inserted_events;
         state.report.duplicate_events += stats.duplicate_events;
+        state.report.reconciled_events += stats.reconciled_events;
         state.report.upserted_sessions += stats.upserted_sessions;
         state.report.updated_cursors += stats.updated_cursors;
         state.report.upserted_accounts += stats.upserted_accounts;
@@ -972,17 +1052,15 @@ impl Core {
 
     fn record_source_error(
         &self,
-        source_id: &str,
-        adapter_type: &str,
-        display_name: &str,
+        descriptor: AdapterDescriptor,
         path: PathBuf,
         error: String,
     ) -> Result<(), CoreError> {
         let timestamp = Utc::now();
         let source = SourceRecord {
-            id: source_id.to_owned(),
-            adapter_type: adapter_type.to_owned(),
-            display_name: display_name.to_owned(),
+            id: descriptor.id.to_owned(),
+            adapter_type: descriptor.adapter_type.to_owned(),
+            display_name: descriptor.display_name.to_owned(),
             path_or_endpoint: Some(path.to_string_lossy().into_owned()),
             enabled: true,
             detected_version: Some("jsonl".to_owned()),
@@ -1032,6 +1110,52 @@ impl Core {
             .clone();
         for listener in listeners {
             listener(summary.clone());
+        }
+        Ok(())
+    }
+
+    fn set_otel_warning(&self, warning: Option<String>) -> Result<(), CoreError> {
+        *self
+            .otel_warning
+            .write()
+            .map_err(|_| CoreError::Lock("OTel warning"))? = warning;
+        Ok(())
+    }
+
+    fn reconfigure_otel(&self, port: Option<u16>) -> Result<(), CoreError> {
+        let mut receiver = self
+            .otel_receiver
+            .lock()
+            .map_err(|_| CoreError::Lock("OTel receiver"))?;
+        if receiver
+            .as_ref()
+            .is_some_and(|value| Some(value.port()) == port)
+        {
+            return Ok(());
+        }
+
+        let previous = receiver.take();
+        drop(previous);
+        let Some(port) = port else {
+            self.set_otel_warning(None)?;
+            return Ok(());
+        };
+        let sink = self
+            .otel_sink
+            .lock()
+            .map_err(|_| CoreError::Lock("OTel sink"))?
+            .clone()
+            .ok_or_else(|| CoreError::Adapter("OTel sink is not initialized".to_owned()))?;
+        match OtelReceiver::start(port, sink) {
+            Ok(next) => {
+                receiver.replace(next);
+                self.set_otel_warning(None)?;
+            }
+            Err(error) => {
+                self.set_otel_warning(Some(format!(
+                    "OTel 接收器未启动（127.0.0.1:{port}）：{error}"
+                )))?;
+            }
         }
         Ok(())
     }
@@ -1234,7 +1358,55 @@ mod tests {
 
     use tokenbuddy_domain::QuickSummary;
 
-    use super::{Core, CoreConfig, account_rotation_detected};
+    use super::{ADAPTER_DESCRIPTORS, Core, CoreConfig, account_rotation_detected};
+
+    #[test]
+    fn adapter_catalog_is_complete_and_declares_source_boundaries() {
+        let ids: Vec<_> = ADAPTER_DESCRIPTORS
+            .iter()
+            .map(|descriptor| descriptor.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "codex-session",
+                "claude-code-session",
+                "cc-switch",
+                "cockpit",
+                "otel-http"
+            ]
+        );
+        assert!(
+            ADAPTER_DESCRIPTORS
+                .iter()
+                .filter(|descriptor| descriptor.id != "otel-http")
+                .all(|descriptor| descriptor.read_only)
+        );
+
+        let codex = ADAPTER_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.id == "codex-session")
+            .expect("Codex descriptor");
+        assert!(codex.capabilities.usage_events);
+        assert!(codex.capabilities.quota_snapshots);
+
+        let otel = ADAPTER_DESCRIPTORS
+            .iter()
+            .find(|descriptor| descriptor.id == "otel-http")
+            .expect("OTel descriptor");
+        assert!(otel.capabilities.usage_events);
+        assert!(!otel.read_only);
+
+        let launchers: Vec<_> = ADAPTER_DESCRIPTORS
+            .iter()
+            .filter(|descriptor| descriptor.capabilities.provider_context)
+            .map(|descriptor| descriptor.id)
+            .collect();
+        assert_eq!(
+            launchers,
+            vec!["codex-session", "cc-switch", "cockpit", "otel-http"]
+        );
+    }
 
     #[test]
     fn an_installed_launcher_marks_the_codex_home_as_rotating_accounts() {

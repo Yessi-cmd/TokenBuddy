@@ -128,6 +128,22 @@ impl IngestSource {
             Self::Estimated => "estimated",
         }
     }
+
+    /// Relative trust order when two sources describe the same request.
+    ///
+    /// This is intentionally separate from token precision: a provider may
+    /// report an exact value through a future source, while a session log can
+    /// also be exact for its own record. Storage compares both dimensions before
+    /// replacing a correlated observation.
+    pub const fn precedence(self) -> u8 {
+        match self {
+            Self::Otel => 4,
+            Self::SessionLog => 3,
+            Self::ImportedDatabase => 2,
+            Self::Proxy => 1,
+            Self::QuotaApi | Self::Estimated => 0,
+        }
+    }
 }
 
 impl fmt::Display for IngestSource {
@@ -173,6 +189,40 @@ impl PrecisionLevel {
             Self::Unavailable => "unavailable",
         }
     }
+
+    /// Relative trust order used when reconciling two observations of one
+    /// request. `Unavailable` is lowest because it carries no measured value.
+    pub const fn precedence(self) -> u8 {
+        match self {
+            Self::Verified => 5,
+            Self::ExactSession => 4,
+            Self::Correlated => 3,
+            Self::Estimated => 2,
+            Self::Unavailable => 0,
+        }
+    }
+}
+
+/// Build the canonical identity used to correlate observations from different
+/// adapters without storing any request body.
+///
+/// Request ids are preferred because they are normally stable across a streamed
+/// response and across Session/OTel exports. A response id is the fallback for
+/// providers that do not expose a request id. The app namespace prevents an
+/// opaque id reused by two tools from merging unrelated calls.
+pub fn correlation_key(
+    app: AppKind,
+    request_id: Option<&str>,
+    response_id: Option<&str>,
+) -> Option<String> {
+    request_id
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{}:request:{value}", app.as_str()))
+        .or_else(|| {
+            response_id
+                .filter(|value| !value.is_empty())
+                .map(|value| format!("{}:response:{value}", app.as_str()))
+        })
 }
 
 impl fmt::Display for PrecisionLevel {
@@ -211,6 +261,62 @@ impl CollectionStatus {
 impl fmt::Display for CollectionStatus {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str((*self).as_str())
+    }
+}
+
+/// Capabilities advertised by a source adapter.
+///
+/// The descriptor is deliberately separate from the parser implementation:
+/// the Core and future settings/diagnostics surfaces can answer "what does this
+/// source provide?" without knowing that source's schema. This follows the
+/// descriptor-driven Provider architecture used by mature tray applications,
+/// while keeping the actual data path behind the adapter boundary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdapterCapabilities {
+    /// Whether the adapter emits measured token usage events.
+    pub usage_events: bool,
+    /// Whether it contributes provider or account attribution context.
+    pub provider_context: bool,
+    /// Whether it emits official quota snapshots.
+    pub quota_snapshots: bool,
+    /// Whether the source can be watched for low-latency updates.
+    pub file_watch: bool,
+}
+
+/// Static metadata for one independent source adapter.
+///
+/// A descriptor is a registry entry, not a claim that the source is currently
+/// detected or healthy. Runtime health remains in [`SourceRecord`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdapterDescriptor {
+    /// Stable adapter/source id.
+    pub id: &'static str,
+    /// Schema/implementation family stored on the source row.
+    pub adapter_type: &'static str,
+    /// Human-readable name.
+    pub display_name: &'static str,
+    /// What this source can contribute.
+    pub capabilities: AdapterCapabilities,
+    /// Whether the adapter is read-only with respect to its external source.
+    pub read_only: bool,
+}
+
+impl AdapterDescriptor {
+    /// A conservative descriptor for a third-party implementation that has not
+    /// yet declared its detailed capabilities.
+    pub const fn minimal(id: &'static str, display_name: &'static str) -> Self {
+        Self {
+            id,
+            adapter_type: "unknown",
+            display_name,
+            capabilities: AdapterCapabilities {
+                usage_events: false,
+                provider_context: false,
+                quota_snapshots: false,
+                file_watch: false,
+            },
+            read_only: true,
+        }
     }
 }
 
@@ -913,6 +1019,14 @@ pub trait UsageAdapter: Send + Sync {
     fn id(&self) -> &'static str;
     /// Name shown in the UI.
     fn display_name(&self) -> &'static str;
+    /// Static metadata used by the Core's adapter registry and diagnostics.
+    ///
+    /// The default is intentionally conservative: a new adapter cannot
+    /// accidentally advertise token or quota support before it has declared
+    /// those semantics explicitly.
+    fn descriptor(&self) -> AdapterDescriptor {
+        AdapterDescriptor::minimal(self.id(), self.display_name())
+    }
 
     /// Whether this source exists on this machine, and where.
     async fn detect(&self) -> Result<DetectionResult, AdapterError>;
@@ -1114,6 +1228,7 @@ mod tests {
     use super::{
         AccountRecord, AdapterError, AppKind, CollectionStatus, IngestSource, LauncherKind,
         NormalizedUsage, PrecisionLevel, UsageAdapter, UsageTotals, account_fingerprint,
+        correlation_key,
     };
 
     /// `as_str` is what reaches SQLite; the serde representation is what reaches
@@ -1175,6 +1290,21 @@ mod tests {
             assert_eq!(value.as_str(), name);
             check(value, name);
         }
+    }
+
+    #[test]
+    fn correlation_keys_are_namespaced_and_precedence_is_explicit() {
+        assert_eq!(
+            correlation_key(AppKind::Codex, Some("req-1"), Some("resp-1")),
+            Some("codex:request:req-1".to_owned())
+        );
+        assert_eq!(
+            correlation_key(AppKind::ClaudeCode, None, Some("resp-1")),
+            Some("claude_code:response:resp-1".to_owned())
+        );
+        assert_eq!(correlation_key(AppKind::Codex, Some(""), None), None);
+        assert!(PrecisionLevel::Verified.precedence() > PrecisionLevel::ExactSession.precedence());
+        assert!(IngestSource::Otel.precedence() > IngestSource::SessionLog.precedence());
     }
 
     #[test]
