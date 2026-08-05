@@ -107,7 +107,9 @@ jobs:
 
           - Windows 上的托盘交互、开机自启和路径选择器**尚未在真机验证**，CI 只保证能编译通过。
           - Codex 官方账号识别只反映 `auth.json` 中当前登录的账号；检测到 Cockpit 多账号环境时会主动放弃账号与额度归因，避免把多个账号的用量算到同一个账号头上。
-          - OTel、成本价格表、本地代理尚未实现，相关字段保持 `Unavailable`。
+          - OTel 当前支持可选的 loopback OTLP/HTTP traces；不支持 gRPC/metrics/logs，本地代理仍未实现。
+          - 成本估算只对已知 Provider + Model 价格卡生效；第三方中转和缺少必要字段的费用保持 `N/A`。
+          - 本版本修复了 Windows 安装路径含空格时的自启动、以及托盘唤回最小化窗口的问题。
           NOTES
           )" \
             $(find bundles -type f \( -name '*.msi' -o -name '*.exe' -o -name '*.dmg' \))

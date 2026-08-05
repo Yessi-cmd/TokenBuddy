@@ -27,6 +27,9 @@ tokenbuddy-core = { path = "../../../crates/core" }
 tokenbuddy-domain.workspace = true
 tokenbuddy-storage.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55.0"
+
 [dev-dependencies]
 # The mock runtime lets the command layer be exercised headlessly. It is a
 # dev-only feature of the dependency already in use, so the shipped binary is

@@ -628,6 +628,78 @@ fn core_error(error: CoreError) -> String {
     error.to_string()
 }
 
+#[cfg(windows)]
+const WINDOWS_RUN_REGISTRY_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+#[cfg(windows)]
+const WINDOWS_STARTUP_APPROVED_REGISTRY_KEY: &str =
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+
+#[cfg(windows)]
+const WINDOWS_STARTUP_APPROVED_ENABLED_VALUE: [u8; 12] = [
+    0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+#[cfg(windows)]
+fn sync_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<(), String> {
+    use std::io::ErrorKind;
+
+    use winreg::{
+        RegKey, RegValue,
+        enums::{HKEY_CURRENT_USER, KEY_SET_VALUE, REG_BINARY},
+    };
+
+    let current_user = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = if enabled {
+        current_user
+            .create_subkey(WINDOWS_RUN_REGISTRY_KEY)
+            .map(|(key, _)| key)
+            .map_err(|error| format!("无法打开 Windows 自启动注册表项：{error}"))?
+    } else {
+        match current_user.open_subkey_with_flags(WINDOWS_RUN_REGISTRY_KEY, KEY_SET_VALUE) {
+            Ok(key) => key,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("无法打开 Windows 自启动注册表项：{error}")),
+        }
+    };
+    let value_name = &app.package_info().name;
+
+    if enabled {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("无法定位 TokenBuddy 可执行文件：{error}"))?;
+        let command_line = windows_autostart_command_line(&executable);
+        run_key
+            .set_value(value_name, &command_line)
+            .map_err(|error| format!("无法写入 Windows 自启动项：{error}"))?;
+
+        // Windows may keep a separate StartupApproved value after a user has
+        // disabled an entry in Task Manager. Mark the entry enabled when we
+        // explicitly enable it from TokenBuddy.
+        if let Ok(startup_approved_key) = current_user
+            .open_subkey_with_flags(WINDOWS_STARTUP_APPROVED_REGISTRY_KEY, KEY_SET_VALUE)
+        {
+            startup_approved_key
+                .set_raw_value(
+                    value_name,
+                    &RegValue {
+                        vtype: REG_BINARY,
+                        bytes: WINDOWS_STARTUP_APPROVED_ENABLED_VALUE.to_vec(),
+                    },
+                )
+                .map_err(|error| format!("无法更新 Windows 自启动状态：{error}"))?;
+        }
+
+        Ok(())
+    } else {
+        match run_key.delete_value(value_name) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("无法关闭开机启动：{error}")),
+        }
+    }
+}
+
+#[cfg(not(windows))]
 fn sync_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
 
@@ -643,8 +715,14 @@ fn sync_autostart<R: Runtime>(app: &AppHandle<R>, enabled: bool) -> Result<(), S
     }
 }
 
+#[cfg(any(windows, test))]
+fn windows_autostart_command_line(executable: &Path) -> String {
+    format!("\"{}\"", executable.display())
+}
+
 fn show_window<R: Runtime>(app: &AppHandle<R>, label: &str) {
     if let Some(window) = get_or_create_window(app, label) {
+        let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -719,6 +797,7 @@ fn show_quick_window_at<R: Runtime>(app: &AppHandle<R>, anchor: Option<Rect>) {
         if let Some(anchor) = anchor {
             position_quick_window(app, &window, anchor);
         }
+        let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
@@ -1136,7 +1215,7 @@ mod tests {
     use super::{
         debug_show_windows, fitted_quick_height, greet, max_quick_inner_height,
         next_window_visible, normalized_path, physical_size_at_scale, popover_origin, popover_y,
-        should_dismiss_quick_window, tray_tooltip,
+        should_dismiss_quick_window, tray_tooltip, windows_autostart_command_line,
     };
 
     #[test]
@@ -1150,6 +1229,17 @@ mod tests {
         assert_eq!(
             normalized_path(Some("/sanitized/codex".to_owned())).expect("path"),
             std::path::PathBuf::from("/sanitized/codex")
+        );
+    }
+
+    #[test]
+    fn windows_autostart_quotes_install_paths_with_spaces() {
+        let executable =
+            std::path::Path::new(r"C:\Program Files\TokenBuddy\tokenbuddy-desktop.exe");
+
+        assert_eq!(
+            windows_autostart_command_line(executable),
+            r#""C:\Program Files\TokenBuddy\tokenbuddy-desktop.exe""#
         );
     }
 
