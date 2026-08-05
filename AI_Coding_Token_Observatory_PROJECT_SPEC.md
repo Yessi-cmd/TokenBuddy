@@ -2049,3 +2049,5 @@ Phase 5 OTel 与跨来源关联已完成（2026-08-04）：新增独立 `tokenbu
 Windows 自启动与窗口恢复补强已完成（2026-08-04）：Windows 自启动改为直接维护当前用户 `Run` 注册表项，并给带空格的安装路径写入带引号的命令行；启用时同步恢复 `StartupApproved` 状态，关闭时对不存在的旧项保持幂等。托盘双击、单实例转发和快速面板唤回会先解除窗口最小化，再显示并聚焦，避免“已显示但仍不可见”。新增安装路径引号回归测试；`Phase 4b 跨平台真机交互补验` 仍保持未完成，Windows MSVC 构建、真实托盘、高 DPI、隐藏窗口持续采集、CPU/P95 与路径选择器仍需 Windows CI/真机验收。
 
 Windows 发布同步已完成（2026-08-05）：GitHub `agent/overnight` 最近的 OTel、官方额度、模型/费用、Dashboard 和 Windows 修复已合并到 `main`，版本 `v0.1.2` 已由 Release workflow 在 `windows-latest` 产出并发布 MSI 与 NSIS 安装器；CI run `30964052385` 的 Windows/macOS 格式、Lint、测试、前端构建、Rust 检查和 Tauri 无 bundle 构建均通过，Release run `30964628839` 全部成功。由于 Windows runner 上 Tauri MockRuntime 测试二进制仍会在加载阶段返回 `STATUS_ENTRYPOINT_NOT_FOUND`，该命令契约测试继续只在非 Windows 平台执行；Windows 纯桌面测试与生产 Tauri 构建已覆盖。`Phase 4b 跨平台真机交互补验` 仍未完成，安装包未签名，托盘、自启动、高 DPI、隐藏窗口持续采集和路径选择器仍需 Windows 真机确认。
+
+Windows GUI subsystem 修复已完成（2026-08-05）：桌面二进制入口增加 Windows GUI subsystem 链接属性，直接启动 `tokenbuddy-desktop.exe` 不再创建命令行窗口；版本统一升级到 `v0.1.3`，本机格式、Lint、测试、前端构建、Rust 检查和 Tauri 构建均通过，Windows PE subsystem 待下一次 Windows CI 或实机确认。该修复不等同于 Windows 真机托盘、隐藏窗口持续采集和安装器体验验收，`Phase 4b 跨平台真机交互补验` 仍保持未完成。
