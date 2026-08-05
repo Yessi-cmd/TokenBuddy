@@ -1356,7 +1356,11 @@ mod tests {
 /// Commands taking an `AppHandle` (`save_export`, `show_main_window`, the
 /// pickers, `quit_tokenbuddy`) are deliberately absent: they are bound to the
 /// real runtime, and `quit_tokenbuddy` would end the test process.
-#[cfg(test)]
+// Tauri's MockRuntime test binary currently exits with STATUS_ENTRYPOINT_NOT_FOUND
+// on windows-latest before the first test starts. Keep the command-contract
+// suite on the platforms where the mock runtime is loadable; Windows still
+// runs the pure desktop tests and the full Tauri Windows build in CI.
+#[cfg(all(test, not(windows)))]
 mod command_tests {
     use std::{
         fs,

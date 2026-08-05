@@ -30,9 +30,9 @@ tokenbuddy-storage.workspace = true
 [target.'cfg(windows)'.dependencies]
 winreg = "0.10.1"
 
-[dev-dependencies]
-# The mock runtime lets the command layer be exercised headlessly. It is a
-# dev-only feature of the dependency already in use, so the shipped binary is
-# unchanged.
+[target.'cfg(not(windows))'.dev-dependencies]
+# Tauri's MockRuntime lets the command layer be exercised headlessly. Keep this
+# test-only dependency off Windows: its test binary currently fails during
+# Windows loader initialization on windows-latest, before any test runs.
 tauri = { workspace = true, features = ["test"] }
 tempfile.workspace = true

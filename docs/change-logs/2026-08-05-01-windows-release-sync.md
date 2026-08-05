@@ -21,10 +21,12 @@
 - `v*` tag 继续由 GitHub Actions 在 `windows-latest` 和 `macos-15` 上分别构建安装包，并发布 `.msi`、NSIS `.exe` 和 `.dmg`。
 - release notes 更新为当前已实现的 OTel、费用估算和 Windows 修复状态。
 - Windows 自启动路径引号、StartupApproved 同步和最小化窗口唤回修复随本次版本进入 release。
+- Tauri MockRuntime 命令契约测试保留在 macOS/Linux；由于其 Windows 测试二进制在 `windows-latest` 启动阶段返回 `STATUS_ENTRYPOINT_NOT_FOUND`，Windows CI 改为运行桌面纯函数测试并继续执行完整 Tauri Windows 构建。
 
 ## 验证
 
-将在提交前记录本机格式、lint、测试、Rust check、前端构建和 macOS Tauri 构建；Windows 安装包以 GitHub Actions `windows-latest` release job 的成功结果作为最终验证。
+- 本机 `pnpm format:check`、`pnpm lint`、`pnpm test`、`pnpm build:web`、`pnpm check:rust` 和 `pnpm --filter @tokenbuddy/desktop tauri build --debug --no-bundle` 均通过。
+- GitHub CI 首轮验证发现 Windows Tauri MockRuntime 测试进程在执行测试前返回 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`；修复为平台条件测试后，等待新的 Windows CI run 和 release job 作为最终验证。
 
 ## 剩余限制
 
