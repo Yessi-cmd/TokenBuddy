@@ -28,7 +28,8 @@
 ## 验证
 
 - 本机 `pnpm format:check`、`pnpm lint`、`pnpm test`、`pnpm build:web`、`pnpm check:rust` 和 `pnpm --filter @tokenbuddy/desktop tauri build --debug --no-bundle` 均通过；OTel loopback 测试连续运行 30 次通过。
-- GitHub CI 首轮验证发现 Windows Tauri MockRuntime 测试进程在执行测试前返回 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`；修复为平台条件测试后，Windows 依赖范围问题已修复。最新 CI run `30963683421` 的 Windows job 仍在验证，macOS job 曾因 OTel 测试时序失败，待修复后的新 run 作为最终验证。
+- GitHub CI 首轮验证发现 Windows Tauri MockRuntime 测试进程在执行测试前返回 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`；修复为平台条件测试并补回 Windows 测试夹具依赖后，CI run `30964052385` 的 Windows/macOS job 均成功，包括 Windows Tauri 无 bundle 构建。
+- Release run `30964628839` 成功完成 Windows/macOS 安装包构建和发布；GitHub Release `v0.1.2` 已上传 `TokenBuddy_0.1.2_x64_en-US.msi`、`TokenBuddy_0.1.2_x64-setup.exe` 与 macOS `.dmg`。
 
 ## 剩余限制
 
