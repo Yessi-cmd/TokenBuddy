@@ -4318,7 +4318,7 @@ dependencies = [
  "tokenbuddy-core",
  "tokenbuddy-domain",
  "tokenbuddy-storage",
- "winreg 0.55.0",
+ "winreg 0.10.1",
 ]
 
 [[package]]
