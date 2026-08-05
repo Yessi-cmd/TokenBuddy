@@ -1251,10 +1251,10 @@ fn hex_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::Write,
-        net::TcpStream,
+        io::{Read, Write},
+        net::{Shutdown, TcpStream},
         sync::mpsc,
-        time::{Duration, Instant},
+        time::Duration,
     };
 
     use super::{
@@ -1342,14 +1342,18 @@ mod tests {
         )
         .expect("write headers");
         stream.write_all(payload).expect("write body");
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let batch = loop {
-            if let Ok(batch) = receiver.try_recv() {
-                break batch;
-            }
-            assert!(Instant::now() < deadline, "receiver did not deliver batch");
-            std::thread::sleep(Duration::from_millis(10));
-        };
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("close request body");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set response timeout");
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).expect("read response");
+        assert!(response.starts_with(b"HTTP/1.1 200"), "unexpected response");
+        let batch = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("receiver did not deliver batch");
         assert_eq!(batch.usage_events.len(), 1);
         assert_eq!(batch.usage_events[0].usage.input_tokens_total, Some(7));
         drop(server);

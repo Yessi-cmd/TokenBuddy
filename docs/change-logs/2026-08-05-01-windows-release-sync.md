@@ -12,6 +12,7 @@
 - `.github/workflows/release.yml`
 - `apps/desktop/src-tauri/Cargo.toml`
 - `apps/desktop/src-tauri/src/lib.rs`
+- `crates/otel-receiver/src/lib.rs`
 - `Cargo.lock`
 - `AI_Coding_Token_Observatory_PROJECT_SPEC.md`
 
@@ -22,11 +23,12 @@
 - release notes 更新为当前已实现的 OTel、费用估算和 Windows 修复状态。
 - Windows 自启动路径引号、StartupApproved 同步和最小化窗口唤回修复随本次版本进入 release。
 - Tauri MockRuntime 命令契约测试保留在 macOS/Linux；由于其 Windows 测试二进制在 `windows-latest` 启动阶段返回 `STATUS_ENTRYPOINT_NOT_FOUND`，Windows CI 改为运行桌面纯函数测试并继续执行完整 Tauri Windows 构建。
+- OTel loopback HTTP 集成测试改为关闭请求写端、读取明确的 HTTP 响应后再等待 batch，避免慢速 CI 调度造成偶发超时。
 
 ## 验证
 
-- 本机 `pnpm format:check`、`pnpm lint`、`pnpm test`、`pnpm build:web`、`pnpm check:rust` 和 `pnpm --filter @tokenbuddy/desktop tauri build --debug --no-bundle` 均通过。
-- GitHub CI 首轮验证发现 Windows Tauri MockRuntime 测试进程在执行测试前返回 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`；修复为平台条件测试后，等待新的 Windows CI run 和 release job 作为最终验证。
+- 本机 `pnpm format:check`、`pnpm lint`、`pnpm test`、`pnpm build:web`、`pnpm check:rust` 和 `pnpm --filter @tokenbuddy/desktop tauri build --debug --no-bundle` 均通过；OTel loopback 测试连续运行 30 次通过。
+- GitHub CI 首轮验证发现 Windows Tauri MockRuntime 测试进程在执行测试前返回 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`；修复为平台条件测试后，Windows 依赖范围问题已修复。最新 CI run `30963683421` 的 Windows job 仍在验证，macOS job 曾因 OTel 测试时序失败，待修复后的新 run 作为最终验证。
 
 ## 剩余限制
 
