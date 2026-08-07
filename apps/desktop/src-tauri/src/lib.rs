@@ -37,6 +37,13 @@ use tokenbuddy_domain::{
 };
 use web::{AutostartCallback, LocalWebApiStatus, LocalWebServer};
 
+#[cfg(target_os = "windows")]
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+};
+#[cfg(target_os = "windows")]
+use tauri_plugin_updater::UpdaterExt;
+
 const QUICK_WINDOW_MIN_HEIGHT: f64 = 120.0;
 const QUICK_WINDOW_MARGIN: i32 = 8;
 
@@ -720,6 +727,63 @@ fn windows_autostart_command_line(executable: &Path) -> String {
     format!("\"{}\"", executable.display())
 }
 
+/// Checks GitHub Releases for a newer Windows build and offers to install it.
+///
+/// Windows-only: the updater plugin is registered only there, and the release
+/// workflow signs the NSIS/MSI artifacts this check downloads. Failures (offline
+/// machine, unreachable GitHub, bad signature, already up to date) are logged
+/// and ignored — an update check must never block the collector.
+#[cfg(target_os = "windows")]
+fn spawn_update_checker(app: AppHandle) {
+    std::thread::spawn(move || {
+        // Let the tray, the first import, and the window server settle before
+        // touching the network.
+        std::thread::sleep(StdDuration::from_secs(10));
+        let update = match tauri::async_runtime::block_on(async move {
+            app.updater()
+                .map_err(|error| error.to_string())?
+                .check()
+                .await
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(Some(update)) => update,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!("TokenBuddy update check failed: {error}");
+                return;
+            }
+        };
+        let prompt_app = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            let reply = prompt_app
+                .dialog()
+                .message(format!(
+                    "新版本 {} 已可用，是否立即下载并安装？",
+                    update.version
+                ))
+                .title("TokenBuddy 更新")
+                .kind(MessageDialogKind::Info)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "立即更新".into(),
+                    "稍后".into(),
+                ))
+                .blocking_show_with_result();
+            if matches!(reply, MessageDialogResult::Custom(choice) if choice == "立即更新") {
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = update
+                        .download_and_install(|_chunk, _total| {}, || {})
+                        .await
+                    {
+                        eprintln!("TokenBuddy update install failed: {error}");
+                    }
+                });
+            }
+        }) {
+            eprintln!("TokenBuddy update prompt failed: {error}");
+        }
+    });
+}
+
 fn show_window<R: Runtime>(app: &AppHandle<R>, label: &str) {
     if let Some(window) = get_or_create_window(app, label) {
         let _ = window.unminimize();
@@ -1067,7 +1131,7 @@ fn setup_tray<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
 /// is a background collector that shows UI on demand, not a window that happens
 /// to collect (spec §4.1). Blocks until the user quits from the tray.
 pub fn run() {
-    let result = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_window(app, "main");
         }))
@@ -1075,7 +1139,10 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    let result = builder
         .setup(|app| {
             let database_path = app
                 .path()
@@ -1115,6 +1182,8 @@ pub fn run() {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
             setup_tray(app)?;
+            #[cfg(target_os = "windows")]
+            spawn_update_checker(app.handle().clone());
             let app_handle = app.handle().clone();
             let core = Arc::clone(&app.state::<AppState>().core);
             core.add_summary_listener(move |summary| {
@@ -1356,11 +1425,11 @@ mod tests {
 /// Commands taking an `AppHandle` (`save_export`, `show_main_window`, the
 /// pickers, `quit_tokenbuddy`) are deliberately absent: they are bound to the
 /// real runtime, and `quit_tokenbuddy` would end the test process.
-// Tauri's MockRuntime test binary currently exits with STATUS_ENTRYPOINT_NOT_FOUND
-// on windows-latest before the first test starts. Keep the command-contract
-// suite on the platforms where the mock runtime is loadable; Windows still
-// runs the pure desktop tests and the full Tauri Windows build in CI.
-#[cfg(all(test, not(windows)))]
+// The Windows test binary previously exited with STATUS_ENTRYPOINT_NOT_FOUND
+// at loader init because the Common Controls v6 manifest was only linked into
+// `bin` targets (see build.rs). With the manifest now emitted for every target
+// the mock runtime loads on Windows too, so the suite runs everywhere.
+#[cfg(test)]
 mod command_tests {
     use std::{
         fs,

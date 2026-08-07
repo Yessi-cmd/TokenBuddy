@@ -2004,7 +2004,7 @@ T001 至 T014 是本计划最初定义的第一批任务编号，并不是全部
 [ ] Phase 7：可选本地代理
 ```
 
-最近更新：2026-08-04
+最近更新：2026-08-07
 
 Phase 0 已完成：Tauri 2 + React + TypeScript 桌面壳、Rust workspace、格式化/lint/test/build 命令和 macOS/Windows CI 配置均已建立。Windows 构建仍需在远程 GitHub Actions 环境中执行确认。
 
@@ -2051,3 +2051,5 @@ Windows 自启动与窗口恢复补强已完成（2026-08-04）：Windows 自启
 Windows 发布同步已完成（2026-08-05）：GitHub `agent/overnight` 最近的 OTel、官方额度、模型/费用、Dashboard 和 Windows 修复已合并到 `main`，版本 `v0.1.2` 已由 Release workflow 在 `windows-latest` 产出并发布 MSI 与 NSIS 安装器；CI run `30964052385` 的 Windows/macOS 格式、Lint、测试、前端构建、Rust 检查和 Tauri 无 bundle 构建均通过，Release run `30964628839` 全部成功。由于 Windows runner 上 Tauri MockRuntime 测试二进制仍会在加载阶段返回 `STATUS_ENTRYPOINT_NOT_FOUND`，该命令契约测试继续只在非 Windows 平台执行；Windows 纯桌面测试与生产 Tauri 构建已覆盖。`Phase 4b 跨平台真机交互补验` 仍未完成，安装包未签名，托盘、自启动、高 DPI、隐藏窗口持续采集和路径选择器仍需 Windows 真机确认。
 
 Windows GUI subsystem 修复已完成（2026-08-05）：桌面二进制入口增加 Windows GUI subsystem 链接属性，直接启动 `tokenbuddy-desktop.exe` 不再创建命令行窗口；版本统一升级到 `v0.1.3`，本机格式、Lint、测试、前端构建、Rust 检查和 Tauri 构建均通过，Windows PE subsystem 待下一次 Windows CI 或实机确认。该修复不等同于 Windows 真机托盘、隐藏窗口持续采集和安装器体验验收，`Phase 4b 跨平台真机交互补验` 仍保持未完成。
+
+Windows 分发与自动更新补全已完成（2026-08-07）：loopback Web 服务的 IPv6 绑定改为 best-effort，IPv6 被禁用（常见于企业网/VPN 的 Windows 机器）时面板仍走 `127.0.0.1` 可用；Windows NSIS/MSI 安装包改为内嵌 WebView2 离线安装器（+~127MB），首次安装无需联网，NSIS 界面语言为简体中文、MSI 本地化为 zh-CN；新增 Windows 应用内自动更新（`tauri-plugin-updater` 2.10.1，RSA 签名 + GitHub Releases `latest.json`，启动 10 秒后后台检查、原生对话框确认、`/UPDATE` 静默安装并自动重启，检查失败只记日志）；Release 工作流注入 `TAURI_SIGNING_PRIVATE_KEY` 仓库 secret、上传签名后的 NSIS/MSI 更新负载并生成 `latest.json`，且不再标记 pre-release（`/releases/latest/download` 不解析 pre-release）；`ci.yml` 增加 Cargo 构建缓存；Windows MockRuntime 测试二进制加载期 `STATUS_ENTRYPOINT_NOT_FOUND` 的根因已定位——tauri-winres 只给 `bin` 目标注入 Common Controls v6 manifest，`build.rs` 现在为所有目标补发该 manifest，命令契约测试重新在所有平台运行。本机格式、Lint、测试、前端构建、Rust 检查、Tauri 无 bundle 构建与带签名 release 打包均通过；Windows CI 将确认 MSVC 下测试恢复、NSIS/WiX 中文本地化与 offlineInstaller 内嵌。`Phase 4b 跨平台真机交互补验` 仍保持未完成：托盘、自启动、高 DPI、隐藏窗口持续采集、更新对话框与安装器体验待 Windows 真机验收。

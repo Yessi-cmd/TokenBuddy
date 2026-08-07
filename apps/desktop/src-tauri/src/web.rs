@@ -63,24 +63,26 @@ impl LocalWebServer {
         // resolve localhost to either address family.
         let ipv4_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let port = ipv4_listener.local_addr()?.port();
-        let ipv6_listener = TcpListener::bind((Ipv6Addr::LOCALHOST, port))?;
+        // The IPv6 socket is best-effort: machines with IPv6 disabled (a common
+        // enterprise/VPN configuration on Windows) cannot bind `::1`, and the
+        // dashboard must still come up over 127.0.0.1 instead of failing the
+        // whole server.
+        let ipv6_listener = TcpListener::bind((Ipv6Addr::LOCALHOST, port)).ok();
         ipv4_listener.set_nonblocking(true)?;
-        ipv6_listener.set_nonblocking(true)?;
+        if let Some(listener) = &ipv6_listener {
+            listener.set_nonblocking(true)?;
+        }
         let url = format!("http://127.0.0.1:{port}");
-        let loopback_urls = vec![url.clone(), format!("http://[::1]:{port}")];
+        let loopback_urls = loopback_urls_for(port, ipv6_listener.is_some());
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
+        let listeners: Vec<TcpListener> = [Some(ipv4_listener), ipv6_listener]
+            .into_iter()
+            .flatten()
+            .collect();
         let worker = thread::Builder::new()
             .name("tokenbuddy-web-api".to_owned())
-            .spawn(move || {
-                serve(
-                    vec![ipv4_listener, ipv6_listener],
-                    core,
-                    static_root,
-                    thread_stop,
-                    autostart,
-                )
-            })?;
+            .spawn(move || serve(listeners, core, static_root, thread_stop, autostart))?;
         Ok(Self {
             url,
             loopback_urls,
@@ -126,6 +128,18 @@ struct RescanRequest {
 struct ExportRequest {
     format: String,
     filters: Option<UsageFilters>,
+}
+
+/// The client-visible loopback URLs. The `::1` entry only exists when the IPv6
+/// listener actually bound, so a browser resolving `localhost` to IPv6 does not
+/// get a dead address on machines where IPv6 is disabled.
+fn loopback_urls_for(port: u16, ipv6_bound: bool) -> Vec<String> {
+    let url = format!("http://127.0.0.1:{port}");
+    if ipv6_bound {
+        vec![url, format!("http://[::1]:{port}")]
+    } else {
+        vec![url]
+    }
 }
 
 fn serve(
@@ -617,7 +631,26 @@ mod tests {
     use tempfile::tempdir;
     use tokenbuddy_core::{Core, CoreConfig};
 
-    use super::{LocalWebServer, percent_decode, query_value, resolve_static_file, serve_static};
+    use super::{
+        LocalWebServer, loopback_urls_for, percent_decode, query_value, resolve_static_file,
+        serve_static,
+    };
+
+    #[test]
+    fn loopback_url_list_omits_ipv6_when_its_listener_could_not_bind() {
+        assert_eq!(
+            loopback_urls_for(4137, true),
+            vec![
+                "http://127.0.0.1:4137".to_owned(),
+                "http://[::1]:4137".to_owned()
+            ]
+        );
+        // Machines with IPv6 disabled still get a working IPv4-only dashboard.
+        assert_eq!(
+            loopback_urls_for(4137, false),
+            vec!["http://127.0.0.1:4137".to_owned()]
+        );
+    }
 
     #[test]
     fn static_resolution_stays_inside_the_web_root() {

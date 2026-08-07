@@ -18,12 +18,34 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      },
+      "nsis": {
+        "languages": ["SimpChinese"],
+        "installMode": "currentUser"
+      },
+      "wix": {
+        "language": ["zh-CN"]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlFQkQyMjAzNkQyNDRBRDUKUldUVlNpUnRBeUs5bmxCTCt1MFVGbklrd1E3d3c0SXNtZ3JmK2plQkYweHF4RElacTVmQVdET2kK",
+      "endpoints": [
+        "https://github.com/Yessi-cmd/TokenBuddy/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

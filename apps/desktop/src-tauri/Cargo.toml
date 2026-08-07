@@ -19,6 +19,7 @@ tauri.workspace = true
 tauri-plugin-autostart.workspace = true
 tauri-plugin-dialog.workspace = true
 tauri-plugin-single-instance.workspace = true
+tauri-plugin-updater.workspace = true
 tokenbuddy-codex-session = { path = "../../../crates/adapters/codex-session" }
 tokenbuddy-claude-session = { path = "../../../crates/adapters/claude-session" }
 tokenbuddy-cc-switch = { path = "../../../crates/adapters/cc-switch" }
@@ -32,9 +33,7 @@ winreg = "0.10.1"
 
 [dev-dependencies]
 tempfile.workspace = true
-
-[target.'cfg(not(windows))'.dev-dependencies]
-# Tauri's MockRuntime lets the command layer be exercised headlessly. Keep this
-# test-only dependency off Windows: its test binary currently fails during
-# Windows loader initialization on windows-latest, before any test runs.
+# Tauri's MockRuntime lets the command layer be exercised headlessly. On
+# Windows the test binary needs the Common Controls v6 manifest to load at all
+# (see build.rs) — that is why the manifest is emitted for every target.
 tauri = { workspace = true, features = ["test"] }
