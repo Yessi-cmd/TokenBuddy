@@ -41,6 +41,9 @@ use tokenbuddy_official_quota::{
     DEFAULT_BASE_URL as OFFICIAL_QUOTA_DEFAULT_BASE_URL, DESCRIPTOR as OFFICIAL_QUOTA_DESCRIPTOR,
     OfficialQuotaAdapter, SOURCE_ID as OFFICIAL_QUOTA_SOURCE_ID,
 };
+use tokenbuddy_opencode::{
+    DESCRIPTOR as OPENCODE_DESCRIPTOR, OpenCodeAdapter, SOURCE_ID as OPENCODE_SOURCE_ID,
+};
 use tokenbuddy_otel_receiver::{
     BatchSink as OtelBatchSink, DESCRIPTOR as OTEL_DESCRIPTOR, OtelReceiver,
 };
@@ -58,6 +61,7 @@ pub const ADAPTER_DESCRIPTORS: &[AdapterDescriptor] = &[
     CODEX_DESCRIPTOR,
     OFFICIAL_QUOTA_DESCRIPTOR,
     CLAUDE_DESCRIPTOR,
+    OPENCODE_DESCRIPTOR,
     CC_SWITCH_DESCRIPTOR,
     COCKPIT_DESCRIPTOR,
     OTEL_DESCRIPTOR,
@@ -76,6 +80,8 @@ pub struct CoreConfig {
     pub codex_home: Option<PathBuf>,
     /// Claude home to use when the settings have none.
     pub claude_home: Option<PathBuf>,
+    /// OpenCode database to use when the settings have none.
+    pub opencode_db: Option<PathBuf>,
     /// CC-Switch database to use when the settings have none.
     pub cc_switch_db: Option<PathBuf>,
     /// Cockpit database to use when the settings have none.
@@ -104,6 +110,7 @@ impl CoreConfig {
             database_path: database_path.into(),
             codex_home,
             claude_home: None,
+            opencode_db: None,
             cc_switch_db: None,
             cockpit_db: None,
             official_quota_enabled: false,
@@ -119,6 +126,12 @@ impl CoreConfig {
     /// Set the fallback Claude home.
     pub fn with_claude_home(mut self, claude_home: Option<PathBuf>) -> Self {
         self.claude_home = claude_home;
+        self
+    }
+
+    /// Set the fallback OpenCode database path.
+    pub fn with_opencode_db(mut self, opencode_db: Option<PathBuf>) -> Self {
+        self.opencode_db = opencode_db;
         self
     }
 
@@ -268,6 +281,7 @@ pub struct Core {
     import_lock: Mutex<()>,
     codex_home: RwLock<Option<PathBuf>>,
     claude_home: RwLock<Option<PathBuf>>,
+    opencode_db: RwLock<Option<PathBuf>>,
     cc_switch_db: RwLock<Option<PathBuf>>,
     cockpit_db: RwLock<Option<PathBuf>>,
     official_quota_enabled: bool,
@@ -307,6 +321,13 @@ impl Core {
                 .map(|path| path.to_string_lossy().into_owned());
             settings_changed = true;
         }
+        if settings.opencode_db_path.is_none() && config.opencode_db.is_some() {
+            settings.opencode_db_path = config
+                .opencode_db
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
+            settings_changed = true;
+        }
         if settings_changed {
             database.save_app_settings(&settings)?;
         }
@@ -320,6 +341,11 @@ impl Core {
             .as_deref()
             .map(PathBuf::from)
             .or(config.claude_home);
+        let opencode_db = settings
+            .opencode_db_path
+            .as_deref()
+            .map(PathBuf::from)
+            .or(config.opencode_db);
         let cc_switch_db = settings
             .cc_switch_db_path
             .as_deref()
@@ -338,6 +364,7 @@ impl Core {
             import_lock: Mutex::new(()),
             codex_home: RwLock::new(codex_home),
             claude_home: RwLock::new(claude_home),
+            opencode_db: RwLock::new(opencode_db),
             cc_switch_db: RwLock::new(cc_switch_db),
             cockpit_db: RwLock::new(cockpit_db),
             official_quota_enabled: config.official_quota_enabled,
@@ -546,6 +573,54 @@ impl Core {
             .map_err(|_| CoreError::Lock("Cockpit database"))
     }
 
+    /// Import now, optionally pointing OpenCode at a new database first.
+    pub fn rescan_opencode(&self, opencode_db: Option<PathBuf>) -> Result<ImportReport, CoreError> {
+        if let Some(opencode_db) = opencode_db {
+            self.set_opencode_db(Some(opencode_db))?;
+        }
+        self.refresh_once()
+    }
+
+    /// Point the OpenCode adapter at a database, or `None` to disable it.
+    /// Persists the choice and wakes the worker.
+    pub fn set_opencode_db(&self, opencode_db: Option<PathBuf>) -> Result<(), CoreError> {
+        let mut settings = self.get_app_settings()?;
+        settings.opencode_db_path = opencode_db
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        self.database_lock()?.save_app_settings(&settings)?;
+        *self
+            .opencode_db
+            .write()
+            .map_err(|_| CoreError::Lock("OpenCode database"))? = opencode_db;
+        self.control.wake();
+        Ok(())
+    }
+
+    /// The configured OpenCode database, if any.
+    pub fn opencode_db(&self) -> Result<Option<PathBuf>, CoreError> {
+        self.opencode_db
+            .read()
+            .map(|path| path.clone())
+            .map_err(|_| CoreError::Lock("OpenCode database"))
+    }
+
+    /// Whether the configured OpenCode database is actually there.
+    pub fn detect_opencode_path(&self) -> Result<DetectionResult, CoreError> {
+        let Some(db_path) = self.opencode_db()? else {
+            return Ok(DetectionResult {
+                source_id: OPENCODE_SOURCE_ID.to_owned(),
+                detected: false,
+                path_or_endpoint: None,
+                detected_version: None,
+                message: Some("未配置 OpenCode 数据库".to_owned()),
+            });
+        };
+        OpenCodeAdapter::new(db_path)
+            .detect_sync()
+            .map_err(|error| CoreError::Adapter(error.to_string()))
+    }
+
     /// Whether the configured Cockpit database is actually there.
     pub fn detect_cockpit_path(&self) -> Result<DetectionResult, CoreError> {
         let Some(db_path) = self.cockpit_db()? else {
@@ -635,6 +710,11 @@ impl Core {
             .claude_home
             .write()
             .map_err(|_| CoreError::Lock("Claude Home"))? = settings.claude_home.map(PathBuf::from);
+        *self
+            .opencode_db
+            .write()
+            .map_err(|_| CoreError::Lock("OpenCode database"))? =
+            settings.opencode_db_path.map(PathBuf::from);
         *self
             .cc_switch_db
             .write()
@@ -954,6 +1034,14 @@ impl Core {
                 .warnings
                 .push("未配置 Claude Home；Claude 数据源保持 Unavailable".to_owned()),
         }
+        if let Some(db_path) = self.opencode_db()? {
+            // Unlike the attribution-only launchers, OpenCode is a token
+            // source: its adapter resolves a missing database to `not_found`
+            // health, so a removed or relocated database stays visibly absent
+            // instead of freezing on the last healthy state.
+            let adapter = OpenCodeAdapter::new(db_path);
+            self.import_opencode(adapter, &mut state)?;
+        }
 
         // CC-Switch and Cockpit are optional and additive: import each only when
         // its database is actually present so users without it see no noise.
@@ -1079,6 +1167,26 @@ impl Core {
         }
     }
 
+    fn import_opencode(
+        &self,
+        adapter: OpenCodeAdapter,
+        state: &mut RefreshState,
+    ) -> Result<(), CoreError> {
+        let db_path = adapter.db_path().to_owned();
+        let cursors = self
+            .database_lock()?
+            .list_import_cursors(OPENCODE_SOURCE_ID)?;
+        match adapter.import_history_sync(&cursors) {
+            Ok(batch) => self.apply_batch("OpenCode", batch, state),
+            Err(error) => {
+                let message = format!("OpenCode 导入失败：{error}");
+                state.has_error = true;
+                state.warnings.push(message.clone());
+                self.record_source_error(OPENCODE_DESCRIPTOR, db_path, message)
+            }
+        }
+    }
+
     fn import_cc_switch(
         &self,
         adapter: CcSwitchAdapter,
@@ -1157,10 +1265,10 @@ impl Core {
         error: String,
     ) -> Result<(), CoreError> {
         let timestamp = Utc::now();
-        let detected_version = if descriptor.id == OFFICIAL_QUOTA_SOURCE_ID {
-            "official-quota"
-        } else {
-            "jsonl"
+        let detected_version = match descriptor.id {
+            OFFICIAL_QUOTA_SOURCE_ID => "official-quota",
+            OPENCODE_SOURCE_ID | CC_SWITCH_SOURCE_ID | COCKPIT_SOURCE_ID => "sqlite",
+            _ => "jsonl",
         };
         let source = SourceRecord {
             id: descriptor.id.to_owned(),
@@ -1477,6 +1585,7 @@ mod tests {
                 "codex-session",
                 "openai-official-quota",
                 "claude-code-session",
+                "opencode",
                 "cc-switch",
                 "cockpit",
                 "otel-http"

@@ -23,6 +23,8 @@ pub enum AppKind {
     Codex,
     /// Claude Code CLI.
     ClaudeCode,
+    /// OpenCode TUI.
+    OpenCode,
     /// A source whose app could not be determined. Never a stand-in for a
     /// specific app that simply was not checked.
     Unknown,
@@ -37,6 +39,7 @@ impl AppKind {
         match self {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude_code",
+            Self::OpenCode => "open_code",
             Self::Unknown => "unknown",
         }
     }
@@ -854,6 +857,8 @@ pub struct AppSettings {
     pub claude_home: Option<String>,
     /// CC-Switch database, read-only.
     pub cc_switch_db_path: Option<String>,
+    /// OpenCode data directory or `opencode.db` file, read-only.
+    pub opencode_db_path: Option<String>,
     /// Cockpit Tools database or directory, read-only.
     pub cockpit_path: Option<String>,
     /// Port for the OTel receiver (spec §5, not built).
@@ -1263,6 +1268,7 @@ mod tests {
         for (value, name) in [
             (AppKind::Codex, "codex"),
             (AppKind::ClaudeCode, "claude_code"),
+            (AppKind::OpenCode, "open_code"),
             (AppKind::Unknown, "unknown"),
         ] {
             assert_eq!(value.as_str(), name);

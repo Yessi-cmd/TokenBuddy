@@ -539,6 +539,7 @@ export function DashboardView() {
               <option value="">全部</option>
               <option value="codex">Codex</option>
               <option value="claude_code">Claude Code</option>
+              <option value="open_code">OpenCode</option>
               <option value="unknown">Unknown</option>
             </select>
           </label>

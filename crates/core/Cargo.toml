@@ -14,6 +14,7 @@ tokenbuddy-claude-session = { path = "../adapters/claude-session" }
 tokenbuddy-cc-switch = { path = "../adapters/cc-switch" }
 tokenbuddy-cockpit = { path = "../adapters/cockpit" }
 tokenbuddy-official-quota = { path = "../adapters/official-quota" }
+tokenbuddy-opencode = { path = "../adapters/opencode" }
 tokenbuddy-domain.workspace = true
 tokenbuddy-storage.workspace = true
 tokenbuddy-otel-receiver = { path = "../otel-receiver" }

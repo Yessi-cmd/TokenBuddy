@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type AppKind = "codex" | "claude_code" | "unknown";
+export type AppKind = "codex" | "claude_code" | "open_code" | "unknown";
 export type LauncherKind =
   "direct" | "cc_switch" | "cockpit" | "observer_proxy" | "unknown";
 export type IngestSource =
@@ -246,6 +246,7 @@ export interface AccountSummary {
 export interface AppSettings {
   codex_home: string | null;
   claude_home: string | null;
+  opencode_db_path: string | null;
   cc_switch_db_path: string | null;
   cockpit_path: string | null;
   otel_port: number | null;
@@ -565,6 +566,35 @@ export function detectCockpitPath(
     "detect_cockpit_path",
     `/api/detect-cockpit${queryString({ cockpit_db: cockpitDb })}`,
     { cockpitDb },
+  );
+}
+
+export function detectOpenCodePath(
+  opencodeDb: string | null,
+): Promise<DetectionResult> {
+  return request<DetectionResult>(
+    "detect_opencode_path",
+    `/api/detect-opencode${queryString({ opencode_db: opencodeDb })}`,
+    { opencodeDb },
+  );
+}
+
+export function rescanOpenCode(
+  opencodeDb: string | null,
+): Promise<RescanResult> {
+  return request<RescanResult>(
+    "rescan_opencode",
+    "/api/rescan-opencode",
+    {
+      opencodeDb,
+    },
+    inTauri()
+      ? undefined
+      : {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ opencode_db: opencodeDb }),
+        },
   );
 }
 

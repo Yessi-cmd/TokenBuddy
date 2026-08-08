@@ -43,6 +43,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "0008_model_context_backfill",
         include_str!("../migrations/0008_model_context_backfill.sql"),
     ),
+    (
+        9,
+        "0009_opencode_db_path",
+        include_str!("../migrations/0009_opencode_db_path.sql"),
+    ),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {

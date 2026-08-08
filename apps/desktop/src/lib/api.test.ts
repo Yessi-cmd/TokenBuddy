@@ -158,6 +158,7 @@ describe("api transport", () => {
     const settings: AppSettings = {
       codex_home: "/sanitized/codex",
       claude_home: null,
+      opencode_db_path: null,
       cc_switch_db_path: null,
       cockpit_path: null,
       otel_port: null,
@@ -195,6 +196,7 @@ describe("api transport", () => {
     await api.rescanClaude(null);
     await api.rescanCcSwitch("/sanitized/cc.db");
     await api.rescanCockpit("/sanitized/cockpit.sqlite");
+    await api.rescanOpenCode("/sanitized/opencode.db");
 
     const bodies = fetchMock.mock.calls.map(([, init]) =>
       JSON.parse(String((init as RequestInit).body)),
@@ -204,12 +206,14 @@ describe("api transport", () => {
       "/api/rescan-claude",
       "/api/rescan-cc-switch",
       "/api/rescan-cockpit",
+      "/api/rescan-opencode",
     ]);
     expect(bodies).toEqual([
       { codex_home: "/sanitized/codex" },
       { claude_home: null },
       { cc_switch_db: "/sanitized/cc.db" },
       { cockpit_db: "/sanitized/cockpit.sqlite" },
+      { opencode_db: "/sanitized/opencode.db" },
     ]);
   });
 
@@ -221,12 +225,14 @@ describe("api transport", () => {
     await api.detectClaudePath(null);
     await api.detectCcSwitchPath("/sanitized/cc.db");
     await api.detectCockpitPath(null);
+    await api.detectOpenCodePath("/sanitized/opencode.db");
 
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "/api/detect-codex?codex_home=%2Fsanitized%2Fcodex",
       "/api/detect-claude",
       "/api/detect-cc-switch?cc_switch_db=%2Fsanitized%2Fcc.db",
       "/api/detect-cockpit",
+      "/api/detect-opencode?opencode_db=%2Fsanitized%2Fopencode.db",
     ]);
   });
 

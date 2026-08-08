@@ -1,6 +1,6 @@
 # TokenBuddy
 
-本地优先的 AI 编程 Token 观测工具。统一回答"Codex 和 Claude Code 到底用掉了多少 Token、
+本地优先的 AI 编程 Token 观测工具。统一回答"Codex、Claude Code 和 OpenCode 到底用掉了多少 Token、
 花在哪个会话、由哪个 Provider 和账号服务、以及这个数字有多可信"。
 
 所有数据留在本机 SQLite，不上传、不依赖云端后端。产品与工程约束以
@@ -20,14 +20,15 @@
 
 ## 它读什么
 
-四个只读适配器，任何一个失败或缺失都不影响其余部分：
+五个只读适配器，任何一个失败或缺失都不影响其余部分：
 
-| 来源                | 读取内容                                                | 提供                                    |
-| ------------------- | ------------------------------------------------------- | --------------------------------------- |
-| Codex Session       | `<CODEX_HOME>/sessions/**/*.jsonl`、`auth.json`         | Token、会话、官方账号身份、官方额度窗口 |
-| Claude Code Session | `<CLAUDE_HOME>/projects/**/*.jsonl`                     | Token、会话、父子 Agent 关系            |
-| CC-Switch           | `~/.cc-switch/cc-switch.db`                             | 真实 Provider 与会话级归因              |
-| Cockpit Tools       | `~/.antigravity_cockpit/codex_local_access_logs.sqlite` | 账号身份与账号活动时间窗                |
+| 来源                | 读取内容                                                      | 提供                                    |
+| ------------------- | ------------------------------------------------------------- | --------------------------------------- |
+| Codex Session       | `<CODEX_HOME>/sessions/**/*.jsonl`、`auth.json`               | Token、会话、官方账号身份、官方额度窗口 |
+| Claude Code Session | `<CLAUDE_HOME>/projects/**/*.jsonl`                           | Token、会话、父子 Agent 关系            |
+| OpenCode            | `~/.local/share/opencode/opencode.db`（Windows `%LOCALAPPDATA%`） | Token、会话（请求级 `step-finish`）     |
+| CC-Switch           | `~/.cc-switch/cc-switch.db`                                   | 真实 Provider 与会话级归因              |
+| Cockpit Tools       | `~/.antigravity_cockpit/codex_local_access_logs.sqlite`       | 账号身份与账号活动时间窗                |
 
 默认路径在 macOS / Linux 与 Windows 下各自解析，也可在设置页手工指定或用系统选择器挑选。
 
@@ -133,7 +134,7 @@ cargo llvm-cov --workspace --summary-only
 ```
 crates/domain              共享类型与 UsageAdapter 契约，不依赖 Tauri 或 SQLite
 crates/storage             SQLite 迁移、幂等批量导入、全部聚合查询
-crates/adapters/*          四个只读来源适配器 + 共享的只读 SQLite 读取机制
+crates/adapters/*          五个只读来源适配器 + 共享的只读 SQLite 读取机制
 crates/core                长驻 Core：持有数据库连接、导入线程、QuickSummary
 apps/desktop/src-tauri     Tauri 外壳：托盘、窗口、命令、loopback HTTP 服务
 apps/desktop/src           React SPA，桌面面板与网页面板共用

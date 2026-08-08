@@ -35,6 +35,7 @@ use tokenbuddy_domain::{
     AppSettings, DashboardSummary, DetectionResult, ExportResult, QuickSummary, SessionDetail,
     SessionPage, UsageFilters,
 };
+use tokenbuddy_opencode::{OpenCodeAdapter, default_opencode_db};
 use web::{AutostartCallback, LocalWebApiStatus, LocalWebServer};
 
 #[cfg(target_os = "windows")]
@@ -451,6 +452,30 @@ fn rescan_cockpit(
     state
         .core
         .rescan_cockpit(normalized_path(cockpit_db))
+        .map_err(core_error)
+}
+
+#[tauri::command]
+fn detect_opencode_path(
+    state: State<'_, AppState>,
+    opencode_db: Option<String>,
+) -> Result<DetectionResult, String> {
+    if let Some(path) = normalized_path(opencode_db) {
+        return OpenCodeAdapter::new(path)
+            .detect_sync()
+            .map_err(|error| error.to_string());
+    }
+    state.core.detect_opencode_path().map_err(core_error)
+}
+
+#[tauri::command]
+fn rescan_opencode(
+    state: State<'_, AppState>,
+    opencode_db: Option<String>,
+) -> Result<ImportReport, String> {
+    state
+        .core
+        .rescan_opencode(normalized_path(opencode_db))
         .map_err(core_error)
 }
 
@@ -1152,6 +1177,7 @@ pub fn run() {
             let core = Core::start(
                 CoreConfig::new(database_path, default_codex_home())
                     .with_claude_home(default_claude_home())
+                    .with_opencode_db(default_opencode_db())
                     .with_cc_switch_db(default_cc_switch_db())
                     .with_cockpit_db(default_cockpit_db())
                     .with_official_quota_enabled(true),
@@ -1252,6 +1278,8 @@ pub fn run() {
             rescan_cc_switch,
             detect_cockpit_path,
             rescan_cockpit,
+            detect_opencode_path,
+            rescan_opencode,
             start_local_web_api,
             stop_local_web_api,
             get_local_web_api_status,
@@ -1679,6 +1707,7 @@ mod command_tests {
         assert_eq!(settings.claude_home, None);
         assert_eq!(settings.cc_switch_db_path, None);
         assert_eq!(settings.cockpit_path, None);
+        assert_eq!(settings.opencode_db_path, None);
         assert_eq!(settings.otel_port, None);
         assert_eq!(settings.data_retention_days, None);
         assert!(!settings.proxy_enabled);

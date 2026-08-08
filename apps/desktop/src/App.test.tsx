@@ -91,6 +91,7 @@ describe("App", () => {
     vi.mocked(getAppSettings).mockResolvedValue({
       codex_home: null,
       claude_home: null,
+      opencode_db_path: null,
       cc_switch_db_path: null,
       cockpit_path: null,
       otel_port: null,
@@ -385,6 +386,7 @@ describe("App panels", () => {
     vi.mocked(getAppSettings).mockResolvedValue({
       codex_home: null,
       claude_home: null,
+      opencode_db_path: null,
       cc_switch_db_path: null,
       cockpit_path: null,
       otel_port: null,

@@ -72,12 +72,12 @@
 
 - CC Switch
 - Cockpit Tools
+- OpenCode
 
 ### 后续支持
 
 - Gemini CLI
 - Cursor Agent
-- OpenCode
 - 其他 AI Coding 工具
 
 ---
@@ -327,6 +327,7 @@ CodexSessionAdapter
 CodexOtelAdapter
 ClaudeSessionAdapter
 ClaudeOtelAdapter
+OpenCodeAdapter
 CCSwitchAdapter
 CockpitAdapter
 OfficialQuotaAdapter
@@ -1173,6 +1174,7 @@ Provider
 
 - Codex Home
 - Claude Home
+- OpenCode 数据目录或 `opencode.db` 路径
 - CC Switch DB 路径
 - Cockpit 接口或数据路径
 - OTel 端口
@@ -1455,8 +1457,10 @@ fixtures/
 │   └── claude_otlp.bin
 ├── cc_switch/
 │   └── sanitized.db
-└── cockpit/
-    └── sanitized_usage.json
+├── cockpit/
+│   └── sanitized_usage.json
+└── opencode/
+    └── sanitized.db（测试内生成：session/message/part 表 + step-finish 快照）
 ```
 
 ## 23.3 集成测试
@@ -1685,7 +1689,8 @@ TokenBuddy/
 │   │   ├── claude-session/
 │   │   ├── claude-otel/
 │   │   ├── cc-switch/
-│   │   └── cockpit/
+│   │   ├── cockpit/
+│   │   └── opencode/
 │   ├── correlation/
 │   ├── otlp-receiver/
 │   ├── proxy-core/
@@ -2003,6 +2008,8 @@ T001 至 T014 是本计划最初定义的第一批任务编号，并不是全部
 [x] Phase 6 官方额度 API 独立适配：直接读取 ChatGPT OAuth 官方额度、无 Cockpit 管理、额度快照幂等与手动刷新
 [ ] Phase 7：可选本地代理
 ```
+
+OpenCode 只读适配已完成（2026-08-07）：新增独立 `tokenbuddy-opencode`，只读打开 `opencode.db`（macOS/Linux 默认 `~/.local/share/opencode/opencode.db`，Windows 默认 `%LOCALAPPDATA%\opencode\opencode.db`，均允许用户自定义路径），把 `session` 表映射为会话（标题、项目目录、模型、父会话），把 `part` 表的 `step-finish` 记录映射为每次模型调用的 usage 事件。已在真实数据库上验证：会话累计计数器恰好等于其 step-finish 请求之和（输入、输出、推理、缓存读逐一相等），且不存在单独的累计快照，因此按请求导入不会重复计数；`tokens.total` 只是各字段之和，不单独存储。归一化遵循 Anthropic 式分离语义（`input` 为未缓存输入，缓存读/写独立上报），缺失字段保持 `Unavailable`；OpenCode 自行按模型价格表计算的 `cost` 记入 `estimated_cost`，绝不冒充 Provider 实报费用；`providerID` 只描述用户配置的 Provider 插件而非真实上游，因此 Provider/账号归因保持 `Unavailable`，不生成 Provider 记录。增量导入以 `part.time_created` 高位水位为 cursor，同毫秒桶按稳定 part-id 哈希重读并靠存储层去重幂等；原始 Prompt、工具输入、推理文本与 completion 从不进入领域模型。Core、Tauri commands、loopback `/api/detect-opencode`、`/api/rescan-opencode` 与设置页均已接入；`AppKind` 新增 `open_code`（含 SQLite 迁移 0009）。新增适配器单测（解析、幂等、cursor、坏行、Schema 降级）与 Core 集成测试（导入、幂等、删库降级、异常 Schema 只报源错误不阻断应用）。当前限制：依赖 OpenCode `session`/`message`/`part` 三表；文件监听（`file_watch`）未启用，更新靠后台轮询兜底；Windows 真机路径仍未实测。
 
 最近更新：2026-08-07
 

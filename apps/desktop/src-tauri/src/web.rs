@@ -18,6 +18,7 @@ use tokenbuddy_cockpit::CockpitAdapter;
 use tokenbuddy_codex_session::CodexSessionAdapter;
 use tokenbuddy_core::Core;
 use tokenbuddy_domain::{AppKind, PrecisionLevel, UsageFilters};
+use tokenbuddy_opencode::OpenCodeAdapter;
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
@@ -122,6 +123,7 @@ struct RescanRequest {
     claude_home: Option<String>,
     cc_switch_db: Option<String>,
     cockpit_db: Option<String>,
+    opencode_db: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,6 +412,27 @@ fn route_request_with_autostart(
             match body {
                 Ok(body) => core
                     .rescan_cockpit(normalize_path(body.cockpit_db))
+                    .map_or_else(api_error, |report| json_response(200, &report)),
+                Err(error) => api_error(format!("invalid rescan request: {error}")),
+            }
+        }
+        ("GET", "/api/detect-opencode") => {
+            let detection = query_value(query, "opencode_db")
+                .filter(|value| !value.trim().is_empty())
+                .map(|path| OpenCodeAdapter::new(path).detect_sync());
+            match detection {
+                Some(Ok(result)) => json_response(200, &result),
+                Some(Err(error)) => api_error(error.to_string()),
+                None => core
+                    .detect_opencode_path()
+                    .map_or_else(api_error, |result| json_response(200, &result)),
+            }
+        }
+        ("POST", "/api/rescan-opencode") => {
+            let body = serde_json::from_slice::<RescanRequest>(&request.body);
+            match body {
+                Ok(body) => core
+                    .rescan_opencode(normalize_path(body.opencode_db))
                     .map_or_else(api_error, |report| json_response(200, &report)),
                 Err(error) => api_error(format!("invalid rescan request: {error}")),
             }

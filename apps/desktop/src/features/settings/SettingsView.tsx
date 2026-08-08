@@ -14,6 +14,7 @@ import { describeError } from "../../lib/format";
 const defaultAppSettings: AppSettings = {
   codex_home: null,
   claude_home: null,
+  opencode_db_path: null,
   cc_switch_db_path: null,
   cockpit_path: null,
   otel_port: null,
@@ -55,7 +56,12 @@ export function SettingsView() {
   async function browse(
     kind: "directory" | "file",
     title: string,
-    field: "codex_home" | "claude_home" | "cc_switch_db_path" | "cockpit_path",
+    field:
+      | "codex_home"
+      | "claude_home"
+      | "opencode_db_path"
+      | "cc_switch_db_path"
+      | "cockpit_path",
   ) {
     try {
       const picked =
@@ -80,6 +86,7 @@ export function SettingsView() {
         ...settings,
         codex_home: settings.codex_home?.trim() || null,
         claude_home: settings.claude_home?.trim() || null,
+        opencode_db_path: settings.opencode_db_path?.trim() || null,
         cc_switch_db_path: settings.cc_switch_db_path?.trim() || null,
         cockpit_path: settings.cockpit_path?.trim() || null,
       });
@@ -98,7 +105,7 @@ export function SettingsView() {
     <PageFrame
       eyebrow="Local configuration"
       title="设置"
-      subtitle="Codex 与 Claude Code Session 路径由 Core 持久化并自动增量导入；OTel 仅在显式配置回环端口后接收。"
+      subtitle="Codex、Claude Code 与 OpenCode 路径由 Core 持久化并自动增量导入；OTel 仅在显式配置回环端口后接收。"
     >
       {error ? <p className="notice notice-warning">{error}</p> : null}
       <section className="panel settings-panel" aria-label="应用设置">
@@ -137,6 +144,18 @@ export function SettingsView() {
             placeholder="留空使用系统默认路径"
             onBrowse={() =>
               browse("directory", "选择 Claude Home", "claude_home")
+            }
+          />
+          <SettingsField
+            id="settings-opencode"
+            label="OpenCode 数据库"
+            value={settings.opencode_db_path}
+            onChange={(value) =>
+              setSettings({ ...settings, opencode_db_path: value })
+            }
+            placeholder="选择 opencode.db（只读）"
+            onBrowse={() =>
+              browse("file", "选择 OpenCode 数据库", "opencode_db_path")
             }
           />
           <SettingsField
