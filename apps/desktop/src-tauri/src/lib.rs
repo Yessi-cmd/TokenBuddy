@@ -764,8 +764,10 @@ fn spawn_update_checker(app: AppHandle) {
         // Let the tray, the first import, and the window server settle before
         // touching the network.
         std::thread::sleep(StdDuration::from_secs(10));
+        let update_app = app.clone();
         let update = match tauri::async_runtime::block_on(async move {
-            app.updater()
+            update_app
+                .updater()
                 .map_err(|error| error.to_string())?
                 .check()
                 .await
