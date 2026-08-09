@@ -27,8 +27,8 @@ Ensure every Windows desktop target receives Common Controls v6 while preventing
 - `pnpm --filter @tokenbuddy/desktop test` passed: 2 test files, 55 tests.
 - `pnpm build:web` passed, including TypeScript project compilation and the Vite production build.
 - GitHub Actions run `31285816422` supplied the exact `rustfmt` diff for `build.rs`; the file was updated to match it before the next compiler run.
+- GitHub Actions run `31285870999`, job `Verify (windows-latest)`, passed formatting, Clippy/lint, all frontend and Rust tests, the frontend production build, the Rust workspace check, and the Tauri debug application build without bundling.
 
 ## Remaining limitations
 
-- The Windows linker and runtime result requires confirmation from GitHub Actions because the local machine does not have Rust/MSVC installed.
 - Windows tray interaction, installer UX, update-dialog UX, high-DPI behaviour, hidden-window collection, and CPU/P95 measurements still require Windows real-machine validation.
