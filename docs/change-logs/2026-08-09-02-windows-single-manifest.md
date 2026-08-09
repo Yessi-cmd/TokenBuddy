@@ -26,6 +26,7 @@ Ensure every Windows desktop target receives Common Controls v6 while preventing
 - `pnpm --filter @tokenbuddy/desktop lint` passed.
 - `pnpm --filter @tokenbuddy/desktop test` passed: 2 test files, 55 tests.
 - `pnpm build:web` passed, including TypeScript project compilation and the Vite production build.
+- GitHub Actions run `31285816422` supplied the exact `rustfmt` diff for `build.rs`; the file was updated to match it before the next compiler run.
 
 ## Remaining limitations
 
