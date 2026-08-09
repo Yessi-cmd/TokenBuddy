@@ -67,8 +67,9 @@ jobs:
       - name: Build installers
         run: pnpm build
 
-      # The updater manifest references the NSIS update payload (`*.nsis.zip`
-      # plus its `.sig`), so it can only be generated where those exist. The
+      # Tauri v2 reuses the NSIS installer itself as the update payload and
+      # emits its signature beside it (`*-setup.exe.sig`). The manifest can
+      # therefore only be generated on the Windows runner. The
       # release is intentionally NOT a prerelease: GitHub's `/releases/latest`
       # download URL skips prereleases, and that URL is the update endpoint.
       - name: Generate updater manifest
@@ -76,36 +77,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="$(python3 -c "import json;print(json.load(open('apps/desktop/src-tauri/tauri.conf.json'))['version'])")"
-          ZIP="$(find target/release/bundle -name '*.nsis.zip' | head -1)"
-          test -n "$ZIP" || { echo "NSIS updater payload not found" >&2; exit 1; }
-          SIG="${ZIP}.sig"
+          VERSION="$(node -p 'require("./apps/desktop/src-tauri/tauri.conf.json").version')"
+          INSTALLER="$(find target/release/bundle/nsis -name '*-setup.exe' | head -1)"
+          test -n "$INSTALLER" || { echo "NSIS installer not found" >&2; exit 1; }
+          SIG="${INSTALLER}.sig"
           test -f "$SIG" || { echo "Signature $SIG not found" >&2; exit 1; }
-          echo "Update payload: $ZIP"
-          python3 - "$VERSION" "$ZIP" "$SIG" <<'EOF'
-          import base64, datetime, json, sys
+          echo "Update payload: $INSTALLER"
+          node - "$VERSION" "$INSTALLER" "$SIG" <<'EOF'
+          const fs = require("node:fs");
+          const path = require("node:path");
 
-          version, zip_path, sig_path = sys.argv[1:4]
-          signature = base64.b64encode(open(sig_path, "rb").read()).decode()
-          asset = zip_path.split("/")[-1]
-          manifest = {
+          const [version, installerPath, signaturePath] = process.argv.slice(2);
+          const asset = path.basename(installerPath);
+          const manifest = {
               "version": version,
-              "notes": "TokenBuddy 自动更新",
-              "pub_date": datetime.datetime.now(datetime.timezone.utc)
-              .isoformat()
-              .replace("+00:00", "Z"),
+              "notes": "TokenBuddy automatic update",
+              "pub_date": new Date().toISOString(),
               "platforms": {
                   "windows-x86_64": {
-                      "signature": signature,
-                      "url": (
-                          "https://github.com/Yessi-cmd/TokenBuddy/releases/download/"
-                          f"v{version}/{asset}"
-                      ),
+                      "signature": fs.readFileSync(signaturePath, "utf8").trim(),
+                      "url": `https://github.com/Yessi-cmd/TokenBuddy/releases/download/v${version}/${asset}`,
                   }
               },
-          }
-          with open("latest.json", "w", encoding="utf-8") as f:
-              json.dump(manifest, f, indent=2)
+          };
+          fs.writeFileSync("latest.json", `${JSON.stringify(manifest, null, 2)}\n`);
           EOF
 
       # The bundle layout differs per OS (msi/nsis vs dmg/macos), so the whole
