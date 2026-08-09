@@ -19,7 +19,9 @@ Restore Windows release artifact uploads after Tauri 2 changed its updater artif
 
 - Confirmed that release run `31286660505` completed the Windows installer build and failed only at the previous updater-manifest step.
 - Checked the current Tauri v2 updater documentation: `createUpdaterArtifacts: true` generates `*-setup.exe` and `*-setup.exe.sig` on Windows, and the static manifest must contain the `.sig` file content.
-- A new manual Release workflow run will provide the end-to-end verification for manifest generation and artifact upload.
+- Manual Release workflow run `31287170672` passed the Windows installer build, updater-manifest generation, and artifact upload on commit `f9c1476`.
+- Downloaded the `tokenbuddy-windows-latest` artifact and confirmed that `latest.json` version/asset fields match the NSIS installer and that its signature exactly matches the generated `.sig` file.
+- Installed the resulting NSIS package silently into `D:\software\TokenBuddy`; the installer returned exit code `0`, registered the expected uninstall entry, and the installed `0.1.3` executable remained running after launch.
 
 ## Remaining limitations
 
