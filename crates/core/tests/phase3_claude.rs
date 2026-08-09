@@ -82,6 +82,28 @@ fn core_imports_claude_events_into_shared_queries_and_summary() {
 }
 
 #[test]
+fn core_keeps_the_complete_usage_for_a_streamed_claude_response() {
+    let (home, _) = claude_fixture_home("streamed_usage_enrichment.jsonl");
+    let database = tempfile::tempdir().expect("database directory");
+    let mut config = CoreConfig::new(database.path().join("tokenbuddy.sqlite3"), None)
+        .with_claude_home(Some(home.path().to_owned()));
+    config.poll_interval = Duration::from_secs(60);
+    config.enable_file_watcher = false;
+    let core = Core::start(config).expect("core starts");
+
+    let events = core.list_usage_events(None, 10, 0).expect("Claude events");
+    assert_eq!(events.total, 1);
+    let usage = &events.events[0].usage;
+    assert_eq!(usage.input_tokens_total, Some(54_113));
+    assert_eq!(usage.input_tokens_uncached, Some(225));
+    assert_eq!(usage.cache_read_tokens, Some(53_888));
+    assert_eq!(usage.cache_write_tokens, Some(0));
+    assert_eq!(usage.output_tokens_total, Some(481));
+
+    core.shutdown().expect("core stops");
+}
+
+#[test]
 fn core_wakes_on_claude_session_append_and_keeps_cursor_incremental() {
     let (home, path) = claude_fixture_home("simple_session.jsonl");
     let database = tempfile::tempdir().expect("database directory");

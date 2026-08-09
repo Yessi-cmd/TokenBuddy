@@ -284,6 +284,12 @@ impl Database {
             }
         }
 
+        // Provider attributions and richer copies of a streamed response can
+        // both arrive after the first observation. Re-evaluate estimates in
+        // the same transaction so the UI never exposes a price for the wrong
+        // relay and newly recognized provider routes become available at once.
+        refresh_estimated_costs_on_connection(&transaction)?;
+
         for snapshot in &batch.quota_snapshots {
             if insert_quota_snapshot(&transaction, snapshot)? {
                 stats.inserted_quota_snapshots += 1;
@@ -1462,7 +1468,12 @@ fn apply_attribution(conn: &Connection, attribution: &SessionProviderAttribution
     conn.execute(
         "UPDATE usage_events
             SET provider_id = ?2,
-                account_id = COALESCE(?3, account_id)
+                account_id = COALESCE(?3, account_id),
+                estimated_cost = NULL,
+                currency = CASE
+                    WHEN provider_reported_cost IS NULL THEN NULL
+                    ELSE currency
+                END
           WHERE session_id = ?1",
         params![
             attribution.session_id,
@@ -1798,8 +1809,18 @@ fn insert_usage_event(
     let estimated_cost = if provider_reported_cost.is_some() {
         None
     } else {
+        let provider_upstream_url = provider_id
+            .as_deref()
+            .map(|provider_id| provider_upstream_url(conn, provider_id))
+            .transpose()?
+            .flatten();
         event.estimated_cost.or_else(|| {
-            pricing::estimate_cost(provider_id.as_deref(), event.model.as_deref(), &event.usage)
+            pricing::estimate_cost(
+                provider_id.as_deref(),
+                provider_upstream_url.as_deref(),
+                event.model.as_deref(),
+                &event.usage,
+            )
         })
     };
     let currency = event.currency.clone().or_else(|| {
@@ -1812,11 +1833,11 @@ fn insert_usage_event(
         |row| row.get(0),
     )?;
     if same_hash_exists {
-        // A parser upgrade may enrich the same stable row with a model or a
-        // cost that was unavailable during its first import. Reconcile only
-        // missing fields; repeated imports remain idempotent and never replace
-        // a stronger fact with a guess.
-        let changed = conn.execute(
+        // A parser upgrade may enrich the same stable row with a model, cost,
+        // or a complete usage object that followed a streamed provisional
+        // value. Repeated imports remain idempotent and never replace a known
+        // complete usage object with a weaker observation.
+        let metadata_changed = conn.execute(
             "UPDATE usage_events SET
                  model = COALESCE(model, ?1),
                  provider_id = COALESCE(provider_id, ?2),
@@ -1848,7 +1869,51 @@ fn insert_usage_event(
                 event.raw_event_hash.as_str(),
             ],
         )?;
-        return Ok(if changed > 0 {
+        let existing_usage = stored_usage_by_hash(conn, event.raw_event_hash.as_str())?;
+        let replace_provisional = existing_usage.as_ref().is_some_and(|existing| {
+            existing.input_tokens_total.is_none() && event.usage.input_tokens_total.is_some()
+        });
+        let raw_usage_json = if save_request_metadata {
+            event
+                .raw_usage_json
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?
+        } else {
+            None
+        };
+        let usage_changed = if replace_provisional {
+            // Claude Code can emit an initial {input:0, output:0} observation
+            // and then a complete usage object with the same message id. Once
+            // the total input becomes known, the latter is the authoritative
+            // form of that same response, including a non-zero output value.
+            conn.execute(
+                "UPDATE usage_events SET
+                     input_tokens_total = COALESCE(?1, input_tokens_total),
+                     input_tokens_uncached = COALESCE(?2, input_tokens_uncached),
+                     cache_read_tokens = COALESCE(?3, cache_read_tokens),
+                     cache_write_tokens = COALESCE(?4, cache_write_tokens),
+                     output_tokens_total = COALESCE(?5, output_tokens_total),
+                     reasoning_tokens = COALESCE(?6, reasoning_tokens),
+                     visible_output_tokens = COALESCE(?7, visible_output_tokens),
+                     raw_usage_json = COALESCE(?8, raw_usage_json)
+                 WHERE raw_event_hash = ?9",
+                params![
+                    option_i64(event.usage.input_tokens_total, "input_tokens_total")?,
+                    option_i64(event.usage.input_tokens_uncached, "input_tokens_uncached")?,
+                    option_i64(event.usage.cache_read_tokens, "cache_read_tokens")?,
+                    option_i64(event.usage.cache_write_tokens, "cache_write_tokens")?,
+                    option_i64(event.usage.output_tokens_total, "output_tokens_total")?,
+                    option_i64(event.usage.reasoning_tokens, "reasoning_tokens")?,
+                    option_i64(event.usage.visible_output_tokens, "visible_output_tokens")?,
+                    raw_usage_json,
+                    event.raw_event_hash.as_str(),
+                ],
+            )?
+        } else {
+            0
+        };
+        return Ok(if metadata_changed > 0 || usage_changed > 0 {
             InsertOutcome::Reconciled
         } else {
             InsertOutcome::Duplicate
@@ -1964,22 +2029,31 @@ fn insert_usage_event(
 /// newly supported model price card existed. Provider-reported costs remain
 /// authoritative and are never overwritten.
 fn refresh_estimated_costs_in_connection(conn: &mut Connection) -> Result<()> {
+    let transaction = conn.transaction()?;
+    refresh_estimated_costs_on_connection(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn refresh_estimated_costs_on_connection(conn: &Connection) -> Result<()> {
     let candidates = {
         let mut statement = conn.prepare(
-            "SELECT id, provider_id, model, input_tokens_uncached, cache_read_tokens,
-                    cache_write_tokens, output_tokens_total
-             FROM usage_events
-             WHERE provider_reported_cost IS NULL AND model IS NOT NULL",
+            "SELECT u.id, u.provider_id, p.upstream_url, u.model,
+                    u.input_tokens_uncached, u.cache_read_tokens,
+                    u.cache_write_tokens, u.output_tokens_total
+             FROM usage_events u
+             LEFT JOIN providers p ON p.id = u.provider_id
+             WHERE u.provider_reported_cost IS NULL AND u.model IS NOT NULL",
         )?;
         let rows = statement.query_map([], |row| {
             let usage = NormalizedUsage {
-                input_tokens_uncached: option_u64(row.get(3)?, "input_tokens_uncached")
+                input_tokens_uncached: option_u64(row.get(4)?, "input_tokens_uncached")
                     .map_err(to_sql_error)?,
-                cache_read_tokens: option_u64(row.get(4)?, "cache_read_tokens")
+                cache_read_tokens: option_u64(row.get(5)?, "cache_read_tokens")
                     .map_err(to_sql_error)?,
-                cache_write_tokens: option_u64(row.get(5)?, "cache_write_tokens")
+                cache_write_tokens: option_u64(row.get(6)?, "cache_write_tokens")
                     .map_err(to_sql_error)?,
-                output_tokens_total: option_u64(row.get(6)?, "output_tokens_total")
+                output_tokens_total: option_u64(row.get(7)?, "output_tokens_total")
                     .map_err(to_sql_error)?,
                 ..Default::default()
             };
@@ -1987,6 +2061,7 @@ fn refresh_estimated_costs_in_connection(conn: &mut Connection) -> Result<()> {
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
                 usage,
             ))
         })?;
@@ -1997,13 +2072,18 @@ fn refresh_estimated_costs_in_connection(conn: &mut Connection) -> Result<()> {
         return Ok(());
     }
 
-    let transaction = conn.transaction()?;
-    for (id, provider_id, model, usage) in candidates {
-        let Some(cost) = pricing::estimate_cost(provider_id.as_deref(), model.as_deref(), &usage)
-        else {
+    for (id, provider_id, provider_upstream_url, model, usage) in candidates {
+        let Some(cost) = pricing::estimate_cost(
+            provider_id.as_deref(),
+            provider_upstream_url.as_deref(),
+            model.as_deref(),
+            &usage,
+        ) else {
+            // Some adapters (notably OpenCode) supply their own estimate. An
+            // unmatched static card must not erase that independent value.
             continue;
         };
-        transaction.execute(
+        conn.execute(
             "UPDATE usage_events
              SET estimated_cost = ?1,
                  currency = COALESCE(currency, 'USD')
@@ -2011,8 +2091,51 @@ fn refresh_estimated_costs_in_connection(conn: &mut Connection) -> Result<()> {
             params![cost, id],
         )?;
     }
-    transaction.commit()?;
     Ok(())
+}
+
+fn provider_upstream_url(conn: &Connection, provider_id: &str) -> Result<Option<String>> {
+    let upstream_url = conn
+        .query_row(
+            "SELECT upstream_url FROM providers WHERE id = ?1",
+            params![provider_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    Ok(upstream_url.flatten())
+}
+
+fn stored_usage_by_hash(
+    conn: &Connection,
+    raw_event_hash: &str,
+) -> Result<Option<NormalizedUsage>> {
+    conn.query_row(
+        "SELECT input_tokens_total, input_tokens_uncached, cache_read_tokens,
+                cache_write_tokens, output_tokens_total, reasoning_tokens,
+                visible_output_tokens
+           FROM usage_events WHERE raw_event_hash = ?1",
+        params![raw_event_hash],
+        |row| {
+            Ok(NormalizedUsage {
+                input_tokens_total: option_u64(row.get(0)?, "input_tokens_total")
+                    .map_err(to_sql_error)?,
+                input_tokens_uncached: option_u64(row.get(1)?, "input_tokens_uncached")
+                    .map_err(to_sql_error)?,
+                cache_read_tokens: option_u64(row.get(2)?, "cache_read_tokens")
+                    .map_err(to_sql_error)?,
+                cache_write_tokens: option_u64(row.get(3)?, "cache_write_tokens")
+                    .map_err(to_sql_error)?,
+                output_tokens_total: option_u64(row.get(4)?, "output_tokens_total")
+                    .map_err(to_sql_error)?,
+                reasoning_tokens: option_u64(row.get(5)?, "reasoning_tokens")
+                    .map_err(to_sql_error)?,
+                visible_output_tokens: option_u64(row.get(6)?, "visible_output_tokens")
+                    .map_err(to_sql_error)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// A provider (and grouping account) inferred from a session-log event's model
@@ -2571,8 +2694,9 @@ mod tests {
     use chrono::{DateTime, Duration, Utc};
     use tokenbuddy_domain::{
         AccountActivityWindow, AccountRecord, AppKind, AppSettings, CollectionStatus, ImportBatch,
-        ImportCursor, IngestSource, LauncherKind, NormalizedUsage, PrecisionLevel, QuotaSnapshot,
-        SessionProviderAttribution, SessionRecord, SourceRecord, UsageEvent, UsageFilters,
+        ImportCursor, IngestSource, LauncherKind, NormalizedUsage, PrecisionLevel, ProviderRecord,
+        QuotaSnapshot, SessionProviderAttribution, SessionRecord, SourceRecord, UsageEvent,
+        UsageFilters,
     };
 
     use super::{Database, RetentionOutcome};
@@ -3137,6 +3261,148 @@ mod tests {
         );
         assert_eq!(quick.session_output_tokens, None);
         assert_eq!(quick.today_total_tokens, None);
+    }
+
+    #[test]
+    fn complete_streamed_usage_reconciles_a_provisional_zero_row() {
+        let mut database = Database::open_in_memory().expect("database opens");
+        let mut provisional = event("streamed-response", None);
+        provisional.app = AppKind::ClaudeCode;
+        provisional.model = Some("deepseek-v4-flash".to_owned());
+        provisional.response_id = Some("streamed-message-1".to_owned());
+        provisional.usage.input_tokens_uncached = Some(0);
+        provisional.usage.output_tokens_total = Some(0);
+
+        let mut complete = provisional.clone();
+        complete.usage = NormalizedUsage {
+            input_tokens_total: Some(54_113),
+            input_tokens_uncached: Some(225),
+            cache_read_tokens: Some(53_888),
+            cache_write_tokens: Some(0),
+            output_tokens_total: Some(481),
+            ..Default::default()
+        };
+
+        let report = database
+            .apply_import_batch(&ImportBatch {
+                usage_events: vec![provisional, complete.clone()],
+                ..ImportBatch::default()
+            })
+            .expect("streamed usage import");
+        assert_eq!(report.inserted_events, 1);
+        assert_eq!(report.reconciled_events, 1);
+
+        let stored = database
+            .list_usage_events(None, 10, 0)
+            .expect("stored event")
+            .events
+            .into_iter()
+            .next()
+            .expect("one event");
+        assert_eq!(stored.usage, complete.usage);
+
+        let repeated = database
+            .apply_import_batch(&ImportBatch {
+                usage_events: vec![complete],
+                ..ImportBatch::default()
+            })
+            .expect("repeat complete usage");
+        assert_eq!(repeated.inserted_events, 0);
+        assert_eq!(repeated.duplicate_events, 1);
+    }
+
+    #[test]
+    fn opencode_go_attribution_prices_deepseek_v4_flash() {
+        let mut database = Database::open_in_memory().expect("database opens");
+        let mut usage_event = event("opencode-go-deepseek", Some(54_113));
+        usage_event.app = AppKind::ClaudeCode;
+        usage_event.model = Some("deepseek-v4-flash".to_owned());
+        usage_event.usage.input_tokens_uncached = Some(225);
+        usage_event.usage.cache_read_tokens = Some(53_888);
+        usage_event.usage.cache_write_tokens = Some(0);
+        usage_event.usage.output_tokens_total = Some(481);
+        let provider_id = "cc-switch:claude:opencode-go".to_owned();
+
+        database
+            .apply_import_batch(&ImportBatch {
+                providers: vec![ProviderRecord {
+                    id: provider_id.clone(),
+                    provider_family: "claude".to_owned(),
+                    display_name: "OpenCode Go".to_owned(),
+                    upstream_url: Some("https://opencode.ai/zen/go".to_owned()),
+                    launcher: Some(LauncherKind::CCSwitch),
+                    source_id: Some("cc-switch".to_owned()),
+                }],
+                attributions: vec![SessionProviderAttribution {
+                    session_id: "session-1".to_owned(),
+                    provider_id,
+                    account_id: None,
+                    source_id: "cc-switch".to_owned(),
+                }],
+                sessions: vec![session()],
+                usage_events: vec![usage_event],
+                ..ImportBatch::default()
+            })
+            .expect("OpenCode Go import");
+
+        let stored = database
+            .list_usage_events(None, 10, 0)
+            .expect("priced event")
+            .events
+            .into_iter()
+            .next()
+            .expect("one event");
+        assert!(
+            (stored.estimated_cost.expect("estimated cost") - 0.0003170664).abs() < f64::EPSILON
+        );
+        assert_eq!(stored.currency.as_deref(), Some("USD"));
+    }
+
+    #[test]
+    fn official_deepseek_attribution_prices_deepseek_v4_flash() {
+        let mut database = Database::open_in_memory().expect("database opens");
+        let mut usage_event = event("official-deepseek-v4-flash", Some(54_113));
+        usage_event.app = AppKind::ClaudeCode;
+        usage_event.model = Some("deepseek-v4-flash".to_owned());
+        usage_event.usage.input_tokens_uncached = Some(225);
+        usage_event.usage.cache_read_tokens = Some(53_888);
+        usage_event.usage.cache_write_tokens = Some(0);
+        usage_event.usage.output_tokens_total = Some(481);
+        let provider_id = "cc-switch:claude:deepseek-official".to_owned();
+
+        database
+            .apply_import_batch(&ImportBatch {
+                providers: vec![ProviderRecord {
+                    id: provider_id.clone(),
+                    provider_family: "claude".to_owned(),
+                    display_name: "DeepSeek Official".to_owned(),
+                    upstream_url: Some("https://api.deepseek.com/anthropic".to_owned()),
+                    launcher: Some(LauncherKind::CCSwitch),
+                    source_id: Some("cc-switch".to_owned()),
+                }],
+                attributions: vec![SessionProviderAttribution {
+                    session_id: "session-1".to_owned(),
+                    provider_id,
+                    account_id: None,
+                    source_id: "cc-switch".to_owned(),
+                }],
+                sessions: vec![session()],
+                usage_events: vec![usage_event],
+                ..ImportBatch::default()
+            })
+            .expect("official DeepSeek import");
+
+        let stored = database
+            .list_usage_events(None, 10, 0)
+            .expect("priced event")
+            .events
+            .into_iter()
+            .next()
+            .expect("one event");
+        assert!(
+            (stored.estimated_cost.expect("estimated cost") - 0.0003170664).abs() < f64::EPSILON
+        );
+        assert_eq!(stored.currency.as_deref(), Some("USD"));
     }
 
     #[test]

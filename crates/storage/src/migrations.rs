@@ -48,6 +48,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "0009_opencode_db_path",
         include_str!("../migrations/0009_opencode_db_path.sql"),
     ),
+    (
+        10,
+        "0010_claude_streamed_usage_reimport",
+        include_str!("../migrations/0010_claude_streamed_usage_reimport.sql"),
+    ),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {

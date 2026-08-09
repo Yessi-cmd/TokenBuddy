@@ -31,10 +31,11 @@ enum CacheWriteRule {
 /// by the matched price card is present.
 pub(super) fn estimate_cost(
     provider_id: Option<&str>,
+    provider_upstream_url: Option<&str>,
     model: Option<&str>,
     usage: &NormalizedUsage,
 ) -> Option<f64> {
-    let rule = price_rule(provider_id?, model?)?;
+    let rule = price_rule(provider_id?, provider_upstream_url, model?)?;
     let uncached_input = usage.input_tokens_uncached?;
     let output = usage.output_tokens_total?;
 
@@ -57,7 +58,11 @@ pub(super) fn estimate_cost(
     cost.is_finite().then_some(cost)
 }
 
-fn price_rule(provider_id: &str, model: &str) -> Option<PriceRule> {
+fn price_rule(
+    provider_id: &str,
+    provider_upstream_url: Option<&str>,
+    model: &str,
+) -> Option<PriceRule> {
     let provider = provider_id.trim().to_ascii_lowercase();
     let model = model.trim().to_ascii_lowercase();
     match provider.as_str() {
@@ -126,8 +131,50 @@ fn price_rule(provider_id: &str, model: &str) -> Option<PriceRule> {
             cache_write: CacheWriteRule::Required(3.75),
             output: 15.0,
         }),
+        // OpenCode Go's official rate card
+        // (https://opencode.ai/docs/go/) lists DeepSeek V4 Flash at $0.14
+        // uncached input, $0.0028 cached read, and $0.28 output per million
+        // tokens. Go does not publish a separately billable cache-write term.
+        // CC Switch gives relays installation-local IDs, so bind this rule to
+        // OpenCode's official Go endpoint rather than trusting a display name.
+        _ if is_opencode_go(provider_upstream_url) && model == "deepseek-v4-flash" => {
+            Some(PriceRule {
+                input: 0.14,
+                cache_read: Some(0.0028),
+                cache_write: CacheWriteRule::None,
+                output: 0.28,
+            })
+        }
+        // DeepSeek's official API price card
+        // (https://api-docs.deepseek.com/quick_start/pricing) lists V4 Flash
+        // at $0.14 cache-miss input, $0.0028 cache-hit input, and $0.28 output
+        // per million tokens. Context-cache storage has no separate write fee.
+        // Bind the rule to the official API endpoint so a relay exposing the
+        // same model name never inherits DeepSeek's price accidentally.
+        _ if is_official_deepseek(provider_upstream_url) && model == "deepseek-v4-flash" => {
+            Some(PriceRule {
+                input: 0.14,
+                cache_read: Some(0.0028),
+                cache_write: CacheWriteRule::None,
+                output: 0.28,
+            })
+        }
         _ => None,
     }
+}
+
+fn is_opencode_go(upstream_url: Option<&str>) -> bool {
+    upstream_url.is_some_and(|url| {
+        let url = url.trim().trim_end_matches('/').to_ascii_lowercase();
+        url == "https://opencode.ai/zen/go" || url.starts_with("https://opencode.ai/zen/go/")
+    })
+}
+
+fn is_official_deepseek(upstream_url: Option<&str>) -> bool {
+    upstream_url.is_some_and(|url| {
+        let url = url.trim().trim_end_matches('/').to_ascii_lowercase();
+        url == "https://api.deepseek.com" || url.starts_with("https://api.deepseek.com/")
+    })
 }
 
 fn is_model_variant(model: &str, family: &str) -> bool {
@@ -164,7 +211,8 @@ mod tests {
             ..Default::default()
         };
 
-        let cost = estimate_cost(Some("openai"), Some("gpt-5-codex"), &usage).expect("known price");
+        let cost =
+            estimate_cost(Some("openai"), None, Some("gpt-5-codex"), &usage).expect("known price");
         assert!((cost - 0.0005025).abs() < f64::EPSILON);
     }
 
@@ -183,7 +231,8 @@ mod tests {
             ("gpt-5.6-luna", 0.0000644),
         ];
         for (model, expected) in cases {
-            let cost = estimate_cost(Some("openai"), Some(model), &usage).expect("known price");
+            let cost =
+                estimate_cost(Some("openai"), None, Some(model), &usage).expect("known price");
             assert!((cost - expected).abs() < f64::EPSILON, "{model}: {cost}");
         }
 
@@ -191,7 +240,7 @@ mod tests {
             cache_write_tokens: Some(10),
             ..usage
         };
-        let cost = estimate_cost(Some("openai"), Some("gpt-5.6-sol"), &with_cache_write)
+        let cost = estimate_cost(Some("openai"), None, Some("gpt-5.6-sol"), &with_cache_write)
             .expect("known price");
         assert!((cost - 0.0016725).abs() < f64::EPSILON);
     }
@@ -205,7 +254,7 @@ mod tests {
             output_tokens_total: Some(40),
             ..Default::default()
         };
-        let cost = estimate_cost(Some("anthropic"), Some("claude-3-7-sonnet"), &usage)
+        let cost = estimate_cost(Some("anthropic"), None, Some("claude-3-7-sonnet"), &usage)
             .expect("known price");
         assert!((cost - 0.000984).abs() < f64::EPSILON);
 
@@ -216,6 +265,7 @@ mod tests {
         assert_eq!(
             estimate_cost(
                 Some("anthropic"),
+                None,
                 Some("claude-3-7-sonnet"),
                 &missing_cache_write
             ),
@@ -232,10 +282,10 @@ mod tests {
             output_tokens_total: Some(40),
             ..Default::default()
         };
-        let opus = estimate_cost(Some("anthropic"), Some("claude-opus-5"), &usage)
+        let opus = estimate_cost(Some("anthropic"), None, Some("claude-opus-5"), &usage)
             .expect("known Opus price");
         assert!((opus - 0.00164).abs() < f64::EPSILON);
-        let fable = estimate_cost(Some("anthropic"), Some("claude-fable-5"), &usage)
+        let fable = estimate_cost(Some("anthropic"), None, Some("claude-fable-5"), &usage)
             .expect("known Fable price");
         assert!((fable - 0.00328).abs() < f64::EPSILON);
     }
@@ -249,9 +299,67 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            estimate_cost(Some("cc-switch:relay"), Some("gpt-5-codex"), &usage),
+            estimate_cost(Some("cc-switch:relay"), None, Some("gpt-5-codex"), &usage),
             None
         );
-        assert_eq!(estimate_cost(Some("openai"), None, &usage), None);
+        assert_eq!(estimate_cost(Some("openai"), None, None, &usage), None);
+    }
+
+    #[test]
+    fn prices_deepseek_v4_flash_only_for_the_official_opencode_go_route() {
+        let usage = NormalizedUsage {
+            input_tokens_uncached: Some(225),
+            cache_read_tokens: Some(53_888),
+            cache_write_tokens: Some(0),
+            output_tokens_total: Some(481),
+            ..Default::default()
+        };
+        let cost = estimate_cost(
+            Some("cc-switch:claude:local-id"),
+            Some("https://opencode.ai/zen/go"),
+            Some("deepseek-v4-flash"),
+            &usage,
+        )
+        .expect("official OpenCode Go rate");
+        assert!((cost - 0.0003170664).abs() < f64::EPSILON);
+        assert_eq!(
+            estimate_cost(
+                Some("cc-switch:claude:other"),
+                Some("https://relay.example/v1"),
+                Some("deepseek-v4-flash"),
+                &usage,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn prices_deepseek_v4_flash_for_the_official_deepseek_api() {
+        let usage = NormalizedUsage {
+            input_tokens_uncached: Some(225),
+            cache_read_tokens: Some(53_888),
+            cache_write_tokens: Some(0),
+            output_tokens_total: Some(481),
+            ..Default::default()
+        };
+        for endpoint in [
+            "https://api.deepseek.com",
+            "https://api.deepseek.com/anthropic",
+            "https://api.deepseek.com/v1",
+        ] {
+            let cost = estimate_cost(
+                Some("cc-switch:claude:deepseek-official"),
+                Some(endpoint),
+                Some("deepseek-v4-flash"),
+                &usage,
+            )
+            .expect("official DeepSeek rate");
+            assert!((cost - 0.0003170664).abs() < f64::EPSILON);
+        }
+        assert_eq!(
+            estimate_cost(Some("deepseek"), None, Some("deepseek-v4-flash"), &usage,),
+            None,
+            "a model-derived provider id is not proof of the official route"
+        );
     }
 }

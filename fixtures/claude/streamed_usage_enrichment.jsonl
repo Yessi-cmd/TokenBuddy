@@ -1,0 +1,2 @@
+{"type":"assistant","sessionId":"streamed-usage-session","timestamp":"2026-08-09T01:17:09Z","message":{"id":"streamed-message-1","model":"deepseek-v4-flash","usage":{"input_tokens":0,"output_tokens":0}}}
+{"type":"assistant","sessionId":"streamed-usage-session","timestamp":"2026-08-09T01:17:10Z","message":{"id":"streamed-message-1","model":"deepseek-v4-flash","usage":{"input_tokens":225,"cache_creation_input_tokens":0,"cache_read_input_tokens":53888,"output_tokens":481}}}

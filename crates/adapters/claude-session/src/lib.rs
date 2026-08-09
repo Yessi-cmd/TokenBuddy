@@ -1356,6 +1356,25 @@ mod tests {
     }
 
     #[test]
+    fn streamed_provisional_usage_and_final_usage_share_one_identity() {
+        let (home, _) = fixture_home("streamed_usage_enrichment.jsonl");
+        let batch = ClaudeSessionAdapter::new(home.path())
+            .import_history_sync(&HashMap::new())
+            .expect("import");
+
+        assert_eq!(batch.usage_events.len(), 2);
+        assert_eq!(
+            batch.usage_events[0].raw_event_hash,
+            batch.usage_events[1].raw_event_hash
+        );
+        assert_eq!(batch.usage_events[0].usage.input_tokens_total, None);
+        assert_eq!(batch.usage_events[0].usage.output_tokens_total, Some(0));
+        assert_eq!(batch.usage_events[1].usage.input_tokens_total, Some(54_113));
+        assert_eq!(batch.usage_events[1].usage.cache_read_tokens, Some(53_888));
+        assert_eq!(batch.usage_events[1].usage.output_tokens_total, Some(481));
+    }
+
+    #[test]
     fn resume_copy_under_a_new_session_id_does_not_double_count() {
         // Resume/continue copies a prior response into a new session file with a
         // rewritten sessionId; the identity hash must ignore sessionId so the
