@@ -1,0 +1,7 @@
+[toolchain]
+# Single source of truth for the Rust version used by local dev, CI, and the
+# release build. Pinned so rustfmt/clippy results cannot drift between
+# machines. Bump deliberately after a release and re-run `pnpm check:rust`.
+channel = "1.97.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

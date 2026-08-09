@@ -8,14 +8,21 @@ on:
 permissions:
   contents: read
 
+# A burst of pushes to the same branch cancels the superseded runs so only the
+# final one finishes (and can send one failure notification) instead of every
+# intermediate commit failing independently.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  verify:
-    name: Verify (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, windows-latest]
+  # Fast, platform-independent checks. Runs once on a free Linux runner so a
+  # Prettier/ESLint/type error is reported in about a minute instead of after a
+  # 10-minute build on both desktop OSes.
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -32,40 +39,129 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Install Rust toolchain
-        shell: bash
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
-
-      - name: Cache Cargo build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ matrix.os }}-verify-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ matrix.os }}-verify-
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Check formatting
-        run: pnpm format:check
+        run: pnpm --filter @tokenbuddy/desktop format:check
 
       - name: Lint
-        run: pnpm lint
+        run: pnpm --filter @tokenbuddy/desktop lint
 
       - name: Test
-        run: pnpm test
+        run: pnpm --filter @tokenbuddy/desktop test
 
       - name: Build frontend
         run: pnpm build:web
 
+  # Rust checks on every supported OS. Windows compile coverage is required by
+  # AGENTS.md, and the Cargo cache is keyed by toolchain + Cargo.lock so stale
+  # incremental artifacts can never be restored (a former source of flaky
+  # `link.exe` failures on Windows).
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-latest]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          CHANNEL="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "${CHANNEL}" --profile minimal --component rustfmt,clippy
+          rustup default "${CHANNEL}"
+          rustc --version
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./"
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-targets
+
       - name: Check Rust workspace
-        run: pnpm check:rust
+        run: cargo check --workspace --all-targets
+
+  # The slow, fragile step: actually link and assemble the Tauri app. Runs only
+  # when files that can affect it changed (docs-only commits skip it), and only
+  # when the checks above passed (a broken tree skips it instead of failing a
+  # second job and sending a second notification).
+  package:
+    name: Package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [frontend, rust]
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-latest]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Detect build-relevant changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            build:
+              - 'crates/**'
+              - 'apps/desktop/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'pnpm-lock.yaml'
+              - 'package.json'
+              - 'rust-toolchain.toml'
+              - 'rustfmt.toml'
+              - '.github/workflows/ci.yml'
+
+      - name: Install pnpm
+        if: steps.changes.outputs.build == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Install Node.js
+        if: steps.changes.outputs.build == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        if: steps.changes.outputs.build == 'true'
+        shell: bash
+        run: |
+          CHANNEL="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "${CHANNEL}" --profile minimal --component rustfmt,clippy
+          rustup default "${CHANNEL}"
+          rustc --version
+
+      - name: Cache Cargo build
+        if: steps.changes.outputs.build == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./"
+
+      - name: Install dependencies
+        if: steps.changes.outputs.build == 'true'
+        run: pnpm install --frozen-lockfile
 
       - name: Build Tauri application without bundling
+        if: steps.changes.outputs.build == 'true'
         run: pnpm --filter @tokenbuddy/desktop tauri build --debug --no-bundle
