@@ -8,6 +8,11 @@ rust-version.workspace = true
 name = "tokenbuddy_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "tokenbuddy-desktop"
+path = "src/main.rs"
+test = false
+
 [build-dependencies]
 tauri-build.workspace = true
 
@@ -36,5 +41,5 @@ winreg = "0.10.1"
 tempfile.workspace = true
 # Tauri's MockRuntime lets the command layer be exercised headlessly. On
 # Windows the test binary needs the Common Controls v6 manifest to load at all
-# (see build.rs) — that is why the manifest is emitted for every target.
+# (see build.rs) — that is why the manifest is emitted for test targets.
 tauri = { workspace = true, features = ["test"] }

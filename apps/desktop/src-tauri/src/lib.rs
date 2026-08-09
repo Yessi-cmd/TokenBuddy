@@ -1457,7 +1457,7 @@ mod tests {
 /// real runtime, and `quit_tokenbuddy` would end the test process.
 // The Windows test binary previously exited with STATUS_ENTRYPOINT_NOT_FOUND
 // at loader init because the Common Controls v6 manifest was only linked into
-// `bin` targets (see build.rs). With the manifest now emitted for every target
+// `bin` targets (see build.rs). With the manifest now emitted for test targets
 // the mock runtime loads on Windows too, so the suite runs everywhere.
 #[cfg(test)]
 mod command_tests {
