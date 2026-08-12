@@ -68,6 +68,24 @@ jobs:
       - name: Build installers
         run: pnpm build
 
+      - name: Enforce compact Windows installers
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly MAX_INSTALLER_BYTES=$((50 * 1024 * 1024))
+          for installer in \
+            target/release/bundle/nsis/*-setup.exe \
+            target/release/bundle/msi/*.msi; do
+            test -f "$installer" || { echo "Installer not found: $installer" >&2; exit 1; }
+            size="$(wc -c < "$installer")"
+            echo "$(basename "$installer"): $size bytes"
+            if (( size > MAX_INSTALLER_BYTES )); then
+              echo "Installer exceeds the 50 MiB release limit: $installer" >&2
+              exit 1
+            fi
+          done
+
       # Tauri v2 reuses the NSIS installer itself as the update payload and
       # emits its signature beside it (`*-setup.exe.sig`). The manifest can
       # therefore only be generated on the Windows runner. The
@@ -152,7 +170,7 @@ jobs:
 
           ## 安装
 
-          - Windows：下载 `.msi` 或 `-setup.exe`。安装包**未签名**，SmartScreen 会提示"Windows 已保护你的电脑"，需点击"更多信息"→"仍要运行"。安装包内嵌 WebView2 离线安装器，无需联网即可完成首次安装。
+          - Windows：下载 `.msi` 或 `-setup.exe`。安装包**未签名**，SmartScreen 会提示"Windows 已保护你的电脑"，需点击"更多信息"→"仍要运行"。若系统尚未安装 WebView2，安装器会联网下载 Microsoft WebView2 Bootstrapper；已有 WebView2 时不会重复下载。
           - macOS：下载 `.dmg`。同样未签名，首次打开需在"系统设置 → 隐私与安全性"中放行。
 
           ## 自动更新
@@ -167,7 +185,7 @@ jobs:
           - Codex 官方账号识别只反映 `auth.json` 中当前登录的账号；检测到 Cockpit 多账号环境时会主动放弃账号与额度归因，避免把多个账号的用量算到同一个账号头上。
           - OTel 当前支持可选的 loopback OTLP/HTTP traces；不支持 gRPC/metrics/logs，本地代理仍未实现。
           - 成本估算只对已知 Provider + Model 价格卡生效；第三方中转和缺少必要字段的费用保持 `N/A`。
-          - 本版本在设置页新增清晰的“开机自启”开关，说明登录后仅后台运行、不自动弹出完整面板，并继续复用 Windows 当前用户 `Run` 注册表与 macOS LaunchAgent。
+          - 本版本移除内嵌的 WebView2 离线安装器，显著缩小 Windows MSI/EXE，并新增 50 MiB 发布体积上限，防止安装包再次异常膨胀。
           NOTES
           )" \
             $(find bundles -type f \( -name '*.msi' -o -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.sig' -o -name 'latest.json' \))
