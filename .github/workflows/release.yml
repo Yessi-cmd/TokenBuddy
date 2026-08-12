@@ -167,7 +167,7 @@ jobs:
           - Codex 官方账号识别只反映 `auth.json` 中当前登录的账号；检测到 Cockpit 多账号环境时会主动放弃账号与额度归因，避免把多个账号的用量算到同一个账号头上。
           - OTel 当前支持可选的 loopback OTLP/HTTP traces；不支持 gRPC/metrics/logs，本地代理仍未实现。
           - 成本估算只对已知 Provider + Model 价格卡生效；第三方中转和缺少必要字段的费用保持 `N/A`。
-          - 本版本修复了 Windows 安装路径含空格时的自启动、托盘唤回最小化窗口、直接启动桌面程序时额外弹出命令行窗口的问题，并新增 Windows 应用内自动更新与离线 WebView2 安装。
+          - 本版本在设置页新增清晰的“开机自启”开关，说明登录后仅后台运行、不自动弹出完整面板，并继续复用 Windows 当前用户 `Run` 注册表与 macOS LaunchAgent。
           NOTES
           )" \
             $(find bundles -type f \( -name '*.msi' -o -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.sig' -o -name 'latest.json' \))

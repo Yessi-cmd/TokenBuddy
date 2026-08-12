@@ -2011,7 +2011,7 @@ T001 至 T014 是本计划最初定义的第一批任务编号，并不是全部
 
 OpenCode 只读适配已完成（2026-08-07）：新增独立 `tokenbuddy-opencode`，只读打开 `opencode.db`（macOS/Linux 默认 `~/.local/share/opencode/opencode.db`，Windows 默认 `%LOCALAPPDATA%\opencode\opencode.db`，均允许用户自定义路径），把 `session` 表映射为会话（标题、项目目录、模型、父会话），把 `part` 表的 `step-finish` 记录映射为每次模型调用的 usage 事件。已在真实数据库上验证：会话累计计数器恰好等于其 step-finish 请求之和（输入、输出、推理、缓存读逐一相等），且不存在单独的累计快照，因此按请求导入不会重复计数；`tokens.total` 只是各字段之和，不单独存储。归一化遵循 Anthropic 式分离语义（`input` 为未缓存输入，缓存读/写独立上报），缺失字段保持 `Unavailable`；OpenCode 自行按模型价格表计算的 `cost` 记入 `estimated_cost`，绝不冒充 Provider 实报费用；`providerID` 只描述用户配置的 Provider 插件而非真实上游，因此 Provider/账号归因保持 `Unavailable`，不生成 Provider 记录。增量导入以 `part.time_created` 高位水位为 cursor，同毫秒桶按稳定 part-id 哈希重读并靠存储层去重幂等；原始 Prompt、工具输入、推理文本与 completion 从不进入领域模型。Core、Tauri commands、loopback `/api/detect-opencode`、`/api/rescan-opencode` 与设置页均已接入；`AppKind` 新增 `open_code`（含 SQLite 迁移 0009）。新增适配器单测（解析、幂等、cursor、坏行、Schema 降级）与 Core 集成测试（导入、幂等、删库降级、异常 Schema 只报源错误不阻断应用）。当前限制：依赖 OpenCode `session`/`message`/`part` 三表；文件监听（`file_watch`）未启用，更新靠后台轮询兜底；Windows 真机路径仍未实测。
 
-最近更新：2026-08-09
+最近更新：2026-08-12
 
 Phase 0 已完成：Tauri 2 + React + TypeScript 桌面壳、Rust workspace、格式化/lint/test/build 命令和 macOS/Windows CI 配置均已建立。Windows 构建仍需在远程 GitHub Actions 环境中执行确认。
 
@@ -2066,3 +2066,5 @@ Windows CI Manifest 链接修复已完成（2026-08-09）：Windows 更新检查
 Claude 流式 usage 补全与 OpenCode Go 定价修复已完成（2026-08-09）：Claude Code 对同一 message ID 先写入零值临时 usage、再写入完整 usage 时，存储层现在以完整输入、缓存读写和输出原位补全同一稳定事件，不新增事件、不破坏重复导入幂等性；迁移 0010 仅清除 Claude Session cursor，使已有安装在下一次只读扫描时修复历史临时值。新增脱敏流式 Schema fixture、Adapter、Storage 和 Core 回归覆盖。`deepseek-v4-flash` 新增 OpenCode Go 官方端点专属价格卡，按每百万 token USD 0.14 未缓存输入、USD 0.0028 缓存读取、USD 0.28 输出估算，缓存写入不虚构费用；规则严格绑定 `https://opencode.ai/zen/go`，其他同名中转继续保持 `N/A`。Provider 归属变化后会立即重算或清除不再适用的静态价格估算，供应商实报费用与 Adapter 自带估算保持优先。前端格式、lint、55 项测试与生产构建、SQLite 0001-0010 顺序迁移、`git diff --check`，以及受影响 Claude Adapter、Storage、Core 的 Rust 1.97.1 Clippy、67 项测试和 workspace check 已通过；完整 Windows Tauri 桌面链接因本机缺少 MSVC Build Tools 且 GNU DLL 链接器不兼容而待 CI 验证。
 
 DeepSeek 官方 API 定价已完成（2026-08-09）：`deepseek-v4-flash` 在 Provider 明确指向 `https://api.deepseek.com` 官方端点（含 `/anthropic`、`/v1` 子路径）时，按每百万 token USD 0.14 缓存未命中输入、USD 0.0028 缓存命中输入、USD 0.28 输出计算 API-equivalent 估算，不虚构缓存写入费用。规则要求官方 endpoint；仅由模型名推导出的 `deepseek` provider 或其他同名中转继续保持 `N/A`，符合 §18.1 与 §32.8 的 Provider + Model 定价边界。新增官方端点、兼容子路径、无端点拒绝和 Storage Provider 归属集成覆盖；供应商实报费用仍优先于估算。
+
+开机自启设置入口补强已完成（2026-08-12）：设置页新增独立的“启动行为 / 后台运行”区域，以清晰开关提供“开机自启”选择，并明确说明登录系统后仅在后台启动 TokenBuddy、不自动弹出完整面板，以及修改在保存设置后生效。该入口继续复用已有的 `auto_start` 持久化契约、Windows 当前用户 `Run` 注册表实现和 macOS LaunchAgent 实现，默认保持关闭，不静默改变用户选择。新增前端交互回归测试，覆盖默认关闭、用户显式勾选、保存前不写入以及保存时提交 `auto_start = true`；桌面端、Tauri、Rust workspace 与锁文件版本同步升级至 `0.1.4` 作为本批次发布版本。Windows/macOS 的真实登录启动体验仍归入未完成的 `Phase 4b 跨平台真机交互补验`。

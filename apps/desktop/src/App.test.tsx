@@ -343,6 +343,30 @@ describe("App", () => {
       screen.queryByRole("button", { name: "Codex Home：浏览" }),
     ).not.toBeInTheDocument();
   });
+
+  it("offers a persisted option to start TokenBuddy when the user logs in", async () => {
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+
+    const autoStart = await screen.findByRole("checkbox", {
+      name: /开机自启/,
+    });
+    expect(autoStart).not.toBeChecked();
+    expect(
+      screen.getByText(/登录系统后在后台启动 TokenBuddy/),
+    ).toBeInTheDocument();
+
+    fireEvent.click(autoStart);
+    expect(autoStart).toBeChecked();
+    expect(updateAppSettings).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => {
+      expect(updateAppSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ auto_start: true }),
+      );
+    });
+  });
 });
 
 /**

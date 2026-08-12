@@ -213,17 +213,41 @@ export function SettingsView() {
             </small>
           </label>
         </div>
-        <div className="settings-flags">
-          <label>
+        <div className="settings-behaviour">
+          <div className="settings-subheading">
+            <p className="section-kicker">启动行为</p>
+            <h3>后台运行</h3>
+          </div>
+          <label
+            className="settings-toggle-option"
+            htmlFor="settings-auto-start"
+          >
             <input
+              id="settings-auto-start"
+              className="settings-toggle-input"
               type="checkbox"
               checked={settings.auto_start}
-              onChange={(event) =>
-                setSettings({ ...settings, auto_start: event.target.checked })
-              }
+              aria-describedby="settings-auto-start-help"
+              onChange={(event) => {
+                setSettings({
+                  ...settings,
+                  auto_start: event.target.checked,
+                });
+                setStatus("自启动选项已修改，尚未保存");
+                setError(null);
+              }}
             />
-            开机自动启动（修改后立即生效）
+            <span className="settings-toggle-control" aria-hidden="true" />
+            <span className="settings-toggle-copy">
+              <strong>开机自启</strong>
+              <small id="settings-auto-start-help">
+                登录系统后在后台启动
+                TokenBuddy，不自动弹出完整面板；保存设置后生效。
+              </small>
+            </span>
           </label>
+        </div>
+        <div className="settings-flags">
           <label>
             <input
               type="checkbox"
