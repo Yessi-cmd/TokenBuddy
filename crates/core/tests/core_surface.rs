@@ -101,10 +101,17 @@ fn configuration_changes_take_effect_without_restarting_the_core() {
     );
 
     // Pointing at a home imports it immediately.
-    let report = core
-        .rescan_codex(Some(home.path().to_owned()))
+    core.rescan_codex(Some(home.path().to_owned()))
         .expect("rescan with a new home");
-    assert_eq!(report.inserted_events, 2);
+    // Changing the path wakes the background worker. Either that worker or
+    // this explicit refresh can win the import lock, so the per-call report is
+    // allowed to contain zero newly inserted rows. The stable contract is that
+    // the configured source has been imported exactly once when the call
+    // returns.
+    assert_eq!(
+        core.list_usage_events(None, 10, 0).expect("events").total,
+        2
+    );
     assert_eq!(
         core.codex_home().expect("home").as_deref(),
         Some(home.path())
