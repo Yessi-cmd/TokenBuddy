@@ -110,11 +110,17 @@ impl Drop for LocalWebServer {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Request {
     method: String,
     target: String,
     body: Vec<u8>,
+    /// The `Host` header, used to reject DNS-rebinding requests that reach
+    /// 127.0.0.1 under an attacker-controlled hostname.
+    host: Option<String>,
+    /// The `Origin` header, used to reject cross-origin writes from a
+    /// malicious page (a browser always attaches it to a POST/PUT).
+    origin: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,9 +193,76 @@ fn handle_connection(
     let Some(request) = read_request(stream)? else {
         return Ok(());
     };
+    if !request_allowed(&request) {
+        stream.write_all(&text_response(
+            403,
+            "forbidden",
+            "text/plain; charset=utf-8",
+        ))?;
+        return Ok(());
+    }
     let response = route_request_with_autostart(&request, core, static_root, autostart);
     stream.write_all(&response)?;
     stream.flush()
+}
+
+/// Whether a request may be served. Binding to loopback keeps the panel off the
+/// network, but a browser page from anywhere can still *send* a request to
+/// 127.0.0.1. Without these checks a malicious page could change settings
+/// through a cross-origin POST whose body is delivered as `text/plain` (no CORS
+/// preflight), or read the responses through a DNS-rebinding hostname. The
+/// `Host` header must therefore name the loopback interface only, and a
+/// mutating request carrying an `Origin` must name a loopback origin. Requests
+/// without an `Origin` (curl, local tools) are accepted: they cannot be
+/// browser-driven CSRF.
+fn request_allowed(request: &Request) -> bool {
+    if !request.host.as_deref().is_some_and(host_is_loopback) {
+        return false;
+    }
+    if matches!(request.method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE") {
+        return request.origin.as_deref().is_none_or(origin_is_loopback);
+    }
+    true
+}
+
+/// Whether a `Host` header value (with or without a port) names the loopback
+/// interface the server binds. A browser's `Host` is the URL's hostname, so a
+/// DNS-rebinding request arrives with the attacker's domain here and is refused.
+fn host_is_loopback(host: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    let host = host.strip_suffix('.').unwrap_or(&host);
+    if let Some(bracketed) = host.strip_prefix('[') {
+        let Some((address, suffix)) = bracketed.split_once(']') else {
+            return false;
+        };
+        let valid_port = suffix.is_empty()
+            || (suffix.starts_with(':')
+                && suffix[1..]
+                    .chars()
+                    .all(|character| character.is_ascii_digit()));
+        return valid_port && (address == "::1" || address == "0:0:0:0:0:0:0:1");
+    }
+    let Some(hostname) = host.split(':').next() else {
+        return false;
+    };
+    // An unbracketed IPv6 literal is never a valid Host header value.
+    if host.matches(':').count() > 1 {
+        return false;
+    }
+    hostname == "localhost" || hostname == "127.0.0.1"
+}
+
+/// Whether an `Origin` header value names a loopback origin, e.g.
+/// `http://127.0.0.1:5173`. Browsers send the requesting page's own origin here
+/// on every POST/PUT, so a cross-origin write from a website is refused while
+/// the panel's own same-origin writes pass.
+fn origin_is_loopback(origin: &str) -> bool {
+    let origin = origin.trim().to_ascii_lowercase();
+    let host_and_port = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .unwrap_or(&origin);
+    host_is_loopback(host_and_port.trim_end_matches('/'))
 }
 
 fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
@@ -212,7 +285,7 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
         }
     }
 
-    let (method, target, content_length) = {
+    let (method, target, content_length, host, origin) = {
         let headers = String::from_utf8_lossy(&bytes[..header_end]);
         let mut lines = headers.split("\r\n");
         let Some(request_line) = lines.next() else {
@@ -222,12 +295,28 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
         let (Some(method), Some(target)) = (request_parts.next(), request_parts.next()) else {
             return Ok(None);
         };
-        let content_length = lines
-            .filter_map(|line| line.split_once(':'))
-            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-            .unwrap_or(0);
-        (method.to_owned(), target.to_owned(), content_length)
+        let mut content_length = 0usize;
+        let mut host = None;
+        let mut origin = None;
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse::<usize>().unwrap_or(0);
+            } else if name.eq_ignore_ascii_case("host") {
+                host = Some(value.trim().to_owned());
+            } else if name.eq_ignore_ascii_case("origin") {
+                origin = Some(value.trim().to_owned());
+            }
+        }
+        (
+            method.to_owned(),
+            target.to_owned(),
+            content_length,
+            host,
+            origin,
+        )
     };
     if content_length > MAX_REQUEST_BYTES {
         return Ok(None);
@@ -245,6 +334,8 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
         method,
         target,
         body: bytes[header_end..body_end].to_vec(),
+        host,
+        origin,
     }))
 }
 
@@ -524,6 +615,7 @@ fn api_error(error: impl ToString) -> Vec<u8> {
 fn raw_response(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
     let reason = match status {
         200 => "OK",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         _ => "Internal Server Error",
@@ -655,8 +747,8 @@ mod tests {
     use tokenbuddy_core::{Core, CoreConfig};
 
     use super::{
-        LocalWebServer, loopback_urls_for, percent_decode, query_value, resolve_static_file,
-        serve_static,
+        LocalWebServer, Request, host_is_loopback, loopback_urls_for, percent_decode, query_value,
+        request_allowed, resolve_static_file, serve_static,
     };
 
     #[test]
@@ -732,6 +824,146 @@ mod tests {
             query_value("search=hello%20world&limit=10", "limit"),
             Some("10".to_owned())
         );
+    }
+
+    #[test]
+    fn loopback_host_policy_accepts_only_loopback_hosts() {
+        for host in [
+            "127.0.0.1",
+            "127.0.0.1:5173",
+            "localhost",
+            "LOCALHOST:80",
+            "localhost.",
+            "[::1]",
+            "[::1]:5173",
+            "[0:0:0:0:0:0:0:1]:80",
+        ] {
+            assert!(host_is_loopback(host), "should accept {host}");
+        }
+        for host in [
+            "evil.example",
+            "evil.example:5173",
+            "127.0.0.2",
+            "localhost.evil.example",
+            "::1",
+            "[::2]",
+            "[]",
+            "[::1]:notaport",
+            "127.0.0.1:5173:5173",
+        ] {
+            assert!(!host_is_loopback(host), "should reject {host}");
+        }
+    }
+
+    #[test]
+    fn request_policy_blocks_cross_origin_writes_and_rebinding_reads() {
+        let request = |method: &str, host: Option<&str>, origin: Option<&str>| Request {
+            method: method.to_owned(),
+            target: "/api/settings".to_owned(),
+            body: Vec::new(),
+            host: host.map(str::to_owned),
+            origin: origin.map(str::to_owned),
+        };
+
+        // Same-origin panel writes and header-less local clients pass.
+        assert!(request_allowed(&request(
+            "PUT",
+            Some("127.0.0.1:5173"),
+            Some("http://127.0.0.1:5173"),
+        )));
+        assert!(request_allowed(&request(
+            "POST",
+            Some("localhost:5173"),
+            Some("http://localhost:5173"),
+        )));
+        assert!(request_allowed(&request(
+            "POST",
+            Some("[::1]:5173"),
+            Some("http://[::1]:5173"),
+        )));
+        assert!(request_allowed(&request(
+            "POST",
+            Some("127.0.0.1:5173"),
+            None
+        )));
+
+        // A malicious page's cross-origin write is refused even when the Host
+        // header legitimately names the loopback interface.
+        assert!(!request_allowed(&request(
+            "POST",
+            Some("127.0.0.1:5173"),
+            Some("https://evil.example"),
+        )));
+        assert!(!request_allowed(&request(
+            "PUT",
+            Some("127.0.0.1:5173"),
+            Some("null"),
+        )));
+
+        // DNS-rebinding requests arrive under the attacker's hostname.
+        assert!(!request_allowed(&request(
+            "GET",
+            Some("evil.example:5173"),
+            None,
+        )));
+        assert!(!request_allowed(&request("GET", None, None)));
+        assert!(!request_allowed(&request(
+            "POST",
+            Some("evil.example"),
+            Some("http://127.0.0.1:5173"),
+        )));
+    }
+
+    /// The full socket path refuses both the cross-origin write (text/plain
+    /// body, no CORS preflight) and the DNS-rebinding read.
+    #[test]
+    fn cross_origin_and_rebinding_requests_are_refused_on_the_socket() {
+        let database = tempdir().expect("database directory");
+        let core = Core::start(CoreConfig::new(
+            database.path().join("tokenbuddy.sqlite3"),
+            None,
+        ))
+        .expect("core starts");
+        let server = LocalWebServer::start(Arc::clone(&core), PathBuf::from("/missing"))
+            .expect("server starts");
+        let port = server
+            .status()
+            .url
+            .expect("url")
+            .rsplit(':')
+            .next()
+            .expect("port")
+            .parse::<u16>()
+            .expect("port number");
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .write_all(
+                b"POST /api/settings HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://evil.example\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .expect("request");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("response");
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "{response:?}"
+        );
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .write_all(
+                b"GET /api/quick-summary HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+            )
+            .expect("request");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("response");
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "{response:?}"
+        );
+
+        drop(server);
+        core.shutdown().expect("core stops");
     }
 
     /// A client that connects and only then writes must still be served.
@@ -832,6 +1064,7 @@ mod tests {
                 method: "GET".to_owned(),
                 target: "/api/quick-summary".to_owned(),
                 body: Vec::new(),
+                ..super::Request::default()
             },
             &core,
             PathBuf::from("/missing").as_path(),
@@ -857,6 +1090,7 @@ mod tests {
                     method: "GET".to_owned(),
                     target: target.to_owned(),
                     body: Vec::new(),
+                    ..super::Request::default()
                 },
                 &core,
                 PathBuf::from("/missing").as_path(),
@@ -883,6 +1117,7 @@ mod tests {
                 method: "GET".to_owned(),
                 target: format!("/api/detect-claude?claude_home={path}"),
                 body: Vec::new(),
+                ..super::Request::default()
             },
             &core,
             PathBuf::from("/missing").as_path(),
@@ -900,6 +1135,7 @@ mod tests {
                     "claude_home": path.as_ref(),
                 }))
                 .expect("rescan JSON"),
+                ..super::Request::default()
             },
             &core,
             PathBuf::from("/missing").as_path(),
@@ -929,6 +1165,7 @@ mod tests {
                 method: "GET".to_owned(),
                 target: "/api/dashboard-summary?app=codex&precision=verified".to_owned(),
                 body: Vec::new(),
+                ..super::Request::default()
             },
             &core,
             PathBuf::from("/missing").as_path(),
@@ -944,6 +1181,7 @@ mod tests {
                 method: "POST".to_owned(),
                 target: "/api/export".to_owned(),
                 body: br#"{"format":"csv","filters":{"app":"codex"}}"#.to_vec(),
+                ..super::Request::default()
             },
             &core,
             PathBuf::from("/missing").as_path(),
