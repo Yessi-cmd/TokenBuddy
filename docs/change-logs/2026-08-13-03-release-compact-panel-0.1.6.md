@@ -29,7 +29,9 @@
 - `pnpm --filter @tokenbuddy/desktop build`：TypeScript 与 Vite 生产构建通过。
 - `git diff --check`：通过。
 - Rust workspace check 未在本机执行：当前 Windows 环境没有可用的 `cargo` 命令；tag Release workflow 会在 Windows/macOS runner 安装项目指定 Rust toolchain 并执行 Tauri 构建。
-- 远端 Release 状态将在 `v0.1.6` workflow 完成后确认。
+- GitHub Actions Release run `31701968925`：Windows bundle、macOS bundle 和 Publish release 全部成功。
+- GitHub Release `v0.1.6`：已于 2026-08-13 发布为正式版本（非 draft、非 prerelease）。
+- 发布附件确认：Windows NSIS EXE、中文 MSI、两个更新签名、`latest.json` 和 macOS ARM64 DMG 均已上传；NSIS 为 4,861,335 bytes，MSI 为 7,028,736 bytes，均低于 50 MiB 上限。
 
 ## 剩余限制
 
