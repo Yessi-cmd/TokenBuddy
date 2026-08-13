@@ -322,8 +322,8 @@ export function DashboardView() {
 
   return (
     <main className="app-shell">
-      <AppNavigation />
-      <header className="topbar topbar-compact" aria-label="总览操作">
+      <header className="dashboard-toolbar" aria-label="总览工具栏">
+        <AppNavigation />
         <div className="topbar-actions">
           <span
             className="status-pill"

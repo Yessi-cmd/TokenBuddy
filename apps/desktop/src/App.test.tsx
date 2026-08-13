@@ -145,6 +145,15 @@ describe("App", () => {
     expect(
       screen.getByRole("button", { name: "扫描全部来源" }),
     ).toBeInTheDocument();
+    const dashboardToolbar = screen.getByRole("banner", {
+      name: "总览工具栏",
+    });
+    expect(
+      screen.getByRole("navigation", { name: "主要导航" }).parentElement,
+    ).toBe(dashboardToolbar);
+    expect(
+      screen.getByRole("button", { name: "扫描全部来源" }).closest("header"),
+    ).toBe(dashboardToolbar);
     expect(screen.getByText("输入 Token")).toBeInTheDocument();
 
     await waitFor(() => {
@@ -259,6 +268,10 @@ describe("App", () => {
         screen.queryByRole("heading", { name: title }),
       ).not.toBeInTheDocument();
       expect(screen.queryByText(eyebrow)).not.toBeInTheDocument();
+      if (path === "/quotas") {
+        expect(document.querySelector(".quota-page")).not.toBeInTheDocument();
+        expect(navigation.closest("main")).toHaveClass("app-shell");
+      }
     },
   );
 
