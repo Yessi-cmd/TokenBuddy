@@ -30,27 +30,10 @@ export function RouteLink({ to, children }: { to: string; children: string }) {
   );
 }
 
-export function PageFrame({
-  eyebrow,
-  title,
-  subtitle,
-  children,
-}: {
-  eyebrow: string;
-  title: string;
-  subtitle: string;
-  children: ReactNode;
-}) {
+export function PageFrame({ children }: { children: ReactNode }) {
   return (
     <main className="app-shell">
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">{eyebrow}</p>
-          <h1>{title}</h1>
-          <p className="subtitle">{subtitle}</p>
-        </div>
-        <AppNavigation />
-      </header>
+      <AppNavigation />
       {children}
     </main>
   );

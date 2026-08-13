@@ -322,12 +322,8 @@ export function DashboardView() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">AI coding token observatory</p>
-          <h1>TokenBuddy</h1>
-          <p className="subtitle">本地优先，先把每一次模型调用看清楚。</p>
-        </div>
+      <AppNavigation />
+      <header className="topbar topbar-compact" aria-label="总览操作">
         <div className="topbar-actions">
           <span
             className="status-pill"
@@ -353,7 +349,6 @@ export function DashboardView() {
           </button>
         </div>
       </header>
-      <AppNavigation />
 
       {error ? <p className="notice notice-warning">{error}</p> : null}
 

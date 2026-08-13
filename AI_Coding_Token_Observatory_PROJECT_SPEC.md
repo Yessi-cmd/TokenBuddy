@@ -2011,7 +2011,7 @@ T001 至 T014 是本计划最初定义的第一批任务编号，并不是全部
 
 OpenCode 只读适配已完成（2026-08-07）：新增独立 `tokenbuddy-opencode`，只读打开 `opencode.db`（macOS/Linux 默认 `~/.local/share/opencode/opencode.db`，Windows 默认 `%LOCALAPPDATA%\opencode\opencode.db`，均允许用户自定义路径），把 `session` 表映射为会话（标题、项目目录、模型、父会话），把 `part` 表的 `step-finish` 记录映射为每次模型调用的 usage 事件。已在真实数据库上验证：会话累计计数器恰好等于其 step-finish 请求之和（输入、输出、推理、缓存读逐一相等），且不存在单独的累计快照，因此按请求导入不会重复计数；`tokens.total` 只是各字段之和，不单独存储。归一化遵循 Anthropic 式分离语义（`input` 为未缓存输入，缓存读/写独立上报），缺失字段保持 `Unavailable`；OpenCode 自行按模型价格表计算的 `cost` 记入 `estimated_cost`，绝不冒充 Provider 实报费用；`providerID` 只描述用户配置的 Provider 插件而非真实上游，因此 Provider/账号归因保持 `Unavailable`，不生成 Provider 记录。增量导入以 `part.time_created` 高位水位为 cursor，同毫秒桶按稳定 part-id 哈希重读并靠存储层去重幂等；原始 Prompt、工具输入、推理文本与 completion 从不进入领域模型。Core、Tauri commands、loopback `/api/detect-opencode`、`/api/rescan-opencode` 与设置页均已接入；`AppKind` 新增 `open_code`（含 SQLite 迁移 0009）。新增适配器单测（解析、幂等、cursor、坏行、Schema 降级）与 Core 集成测试（导入、幂等、删库降级、异常 Schema 只报源错误不阻断应用）。当前限制：依赖 OpenCode `session`/`message`/`part` 三表；文件监听（`file_watch`）未启用，更新靠后台轮询兜底；Windows 真机路径仍未实测。
 
-最近更新：2026-08-12
+最近更新：2026-08-13
 
 Phase 0 已完成：Tauri 2 + React + TypeScript 桌面壳、Rust workspace、格式化/lint/test/build 命令和 macOS/Windows CI 配置均已建立。Windows 构建仍需在远程 GitHub Actions 环境中执行确认。
 
@@ -2072,3 +2072,9 @@ DeepSeek 官方 API 定价已完成（2026-08-09）：`deepseek-v4-flash` 在 Pr
 macOS Core 配置切换测试竞争修复已完成（2026-08-12）：`configuration_changes_take_effect_without_restarting_the_core` 不再假定显式 `rescan_codex` 一定抢在路径变更唤醒的后台 worker 之前取得导入锁；测试改为验证稳定产品契约——调用返回时脱敏 fixture 已恰好导入一次、事件总数为 2，而不是要求某个竞争者的单次 `ImportReport` 必须报告 2。生产导入、cursor 和幂等逻辑未变；该失败仅发生于 GitHub Actions macOS job `31593430292`，同一提交的 Windows Rust、前端格式、lint、测试、workspace check 与构建均已通过，修复后的跨平台结果由后续 CI 复验。
 
 Windows 小体积安装包已完成（2026-08-12）：版本升级至 `0.1.5`，Tauri 的 WebView2 安装模式由 `offlineInstaller` 改为官方默认的 `downloadBootstrapper`，不再给每个 MSI/NSIS 包内嵌约 127 MB 的离线 Runtime；系统已有 WebView2 时直接安装，缺失时由安装器联网获取 Microsoft Bootstrapper。Release workflow 对 MSI 与 EXE 增加 50 MiB 硬上限，任何未来的体积回归会直接阻止发布。自动更新签名、`latest.json`、中文 MSI/NSIS、托盘与开机自启逻辑保持不变；代价是缺少 WebView2 的全离线机器无法完成首次安装，Windows 10/11 通常已随系统提供 WebView2。
+
+完整面板品牌 Hero 移除已完成（2026-08-13）：总览页不再显示大号 `TokenBuddy`、英文眉题和中文品牌副标题，完整面板进入后直接呈现操作区、导航与统计内容；采集状态、扫描全部来源和本地网页入口保持可用，托盘轻量面板的小型标题不受影响。新增前端回归断言，防止三个品牌 Hero 文案重新出现在总览页。
+
+完整面板导航与页面 Hero 统一已完成（2026-08-13）：总览、会话、会话详情、Providers、官方额度、数据源和设置路由现在都把共享主导航放在内容区左上角的第一个位置，不再因页面骨架不同出现在右上角；会话、Providers、官方额度、数据源和设置等路由的英文眉题、大号页面标题及说明副标题已全部移除，页面直接进入功能内容。页面内部用于识别真实功能区的二级标题继续保留；托盘轻量面板不受影响。新增逐路由回归覆盖，验证导航顺序和 Hero 文案缺席。
+
+完整面板紧凑布局发布已完成（2026-08-13）：桌面端、Tauri 与 Rust workspace 版本统一升级至 `0.1.6`，Release 说明同步记录全路由 Hero 移除和左上角导航统一；`v0.1.6` tag 继续通过既有 GitHub Actions 在 Windows/macOS 目标系统构建安装包并发布正式 Release。

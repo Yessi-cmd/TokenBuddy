@@ -102,11 +102,7 @@ export function SettingsView() {
   }
 
   return (
-    <PageFrame
-      eyebrow="Local configuration"
-      title="设置"
-      subtitle="Codex、Claude Code 与 OpenCode 路径由 Core 持久化并自动增量导入；OTel 仅在显式配置回环端口后接收。"
-    >
+    <PageFrame>
       {error ? <p className="notice notice-warning">{error}</p> : null}
       <section className="panel settings-panel" aria-label="应用设置">
         <div className="settings-heading">

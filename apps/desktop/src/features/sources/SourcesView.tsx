@@ -27,11 +27,7 @@ export function SourcesView() {
   }, []);
 
   return (
-    <PageFrame
-      eyebrow="Read-only adapters"
-      title="数据源"
-      subtitle="每个 Adapter 独立报告路径、健康状态和最近错误。"
-    >
+    <PageFrame>
       {error ? <p className="notice notice-warning">{error}</p> : null}
       {sources.length ? (
         <section className="route-grid" aria-label="数据源状态">

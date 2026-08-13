@@ -29,11 +29,7 @@ export function SessionsView() {
   }, []);
 
   return (
-    <PageFrame
-      eyebrow="Session history"
-      title="会话"
-      subtitle="从会话追踪到请求级 Token，精度和缺失值始终可见。"
-    >
+    <PageFrame>
       {error ? <p className="notice notice-warning">{error}</p> : null}
       <section
         className="panel sessions-panel route-panel"

@@ -104,11 +104,7 @@ export function QuotasView() {
 
   return (
     <div className="quota-page">
-      <PageFrame
-        eyebrow="Official quota windows"
-        title="官方额度"
-        subtitle="官方额度与原始 Token 分开保存；这里直接展示官方返回的已用、剩余与重置时间。"
-      >
+      <PageFrame>
         {error ? <p className="notice notice-warning">{error}</p> : null}
 
         <section

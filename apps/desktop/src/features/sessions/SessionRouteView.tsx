@@ -26,11 +26,7 @@ export function SessionRouteView({ sessionId }: { sessionId: string }) {
   }, [sessionId]);
 
   return (
-    <PageFrame
-      eyebrow="Session detail"
-      title="会话详情"
-      subtitle="请求时间线只来自 Core 查询服务，不重新扫描原始日志。"
-    >
+    <PageFrame>
       <p className="route-back">
         <RouteLink to="/sessions">← 返回会话列表</RouteLink>
       </p>

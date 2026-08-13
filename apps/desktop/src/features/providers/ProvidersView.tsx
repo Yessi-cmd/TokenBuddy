@@ -27,11 +27,7 @@ export function ProvidersView() {
   }, []);
 
   return (
-    <PageFrame
-      eyebrow="Provider observatory"
-      title="Providers"
-      subtitle="只展示已被数据源明确识别的 Provider；无法归属时保持 Unavailable。"
-    >
+    <PageFrame>
       {error ? <p className="notice notice-warning">{error}</p> : null}
       {providers.length ? (
         <section className="route-grid" aria-label="Provider 统计">

@@ -134,8 +134,14 @@ describe("App", () => {
     render(<App />);
 
     expect(
-      screen.getByRole("heading", { name: "TokenBuddy" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("heading", { name: "TokenBuddy" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("AI coding token observatory"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("本地优先，先把每一次模型调用看清楚。"),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "扫描全部来源" }),
     ).toBeInTheDocument();
@@ -236,22 +242,25 @@ describe("App", () => {
   });
 
   it.each([
-    ["/providers", "Providers"],
-    ["/quotas", "官方额度"],
-    ["/settings", "设置"],
-  ])("renders the shared SPA route %s", async (path, heading) => {
-    window.history.pushState({}, "", path);
-    render(<App />);
+    ["/sessions", "会话", "Session history"],
+    ["/providers", "Providers", "Provider observatory"],
+    ["/quotas", "官方额度", "Official quota windows"],
+    ["/sources", "数据源", "Read-only adapters"],
+    ["/settings", "设置", "Local configuration"],
+  ])(
+    "keeps navigation first and removes the page hero on %s",
+    (path, title, eyebrow) => {
+      window.history.pushState({}, "", path);
+      render(<App />);
 
-    await waitFor(() => {
+      const navigation = screen.getByRole("navigation", { name: "主要导航" });
+      expect(navigation.parentElement?.firstElementChild).toBe(navigation);
       expect(
-        screen.getByRole("heading", { name: heading }),
-      ).toBeInTheDocument();
-    });
-    expect(
-      screen.getByRole("navigation", { name: "主要导航" }),
-    ).toBeInTheDocument();
-  });
+        screen.queryByRole("heading", { name: title }),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText(eyebrow)).not.toBeInTheDocument();
+    },
+  );
 
   it("keeps the empty provider and quota states explicit", async () => {
     window.history.pushState({}, "", "/providers");

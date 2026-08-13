@@ -185,7 +185,12 @@ jobs:
           - Codex 官方账号识别只反映 `auth.json` 中当前登录的账号；检测到 Cockpit 多账号环境时会主动放弃账号与额度归因，避免把多个账号的用量算到同一个账号头上。
           - OTel 当前支持可选的 loopback OTLP/HTTP traces；不支持 gRPC/metrics/logs，本地代理仍未实现。
           - 成本估算只对已知 Provider + Model 价格卡生效；第三方中转和缺少必要字段的费用保持 `N/A`。
-          - 本版本移除内嵌的 WebView2 离线安装器，显著缩小 Windows MSI/EXE，并新增 50 MiB 发布体积上限，防止安装包再次异常膨胀。
+
+          ## 本版本变化
+
+          - 完整面板移除各路由顶部占用大量空间的品牌与页面 Hero。
+          - 总览、会话、Providers、额度、数据源和设置页面的共享导航统一位于内容区左上角，切换页面时不再跳到右侧。
+          - 页面内部的功能标题、状态、操作按钮和数据内容保持不变。
           NOTES
           )" \
             $(find bundles -type f \( -name '*.msi' -o -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.sig' -o -name 'latest.json' \))
