@@ -16,6 +16,7 @@ import {
   MenuValueRow,
 } from "../../components/Menu";
 import {
+  appLabel,
   collectionStatusLabel,
   describeError,
   formatDate,
@@ -97,7 +98,7 @@ export function QuickSummaryView() {
   const quota = summary?.quota_summary;
   const status = summary?.collection_status ?? "starting";
   const sessionSubtitle =
-    [summary?.active_app, summary?.provider_name, summary?.model]
+    [appLabel(summary?.active_app), summary?.provider_name, summary?.model]
       .filter(Boolean)
       .join(" · ") || "Unavailable";
   const desktop = isDesktopRuntime();

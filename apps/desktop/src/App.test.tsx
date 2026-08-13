@@ -4,6 +4,7 @@ import App from "./App";
 import {
   detectClaudePath,
   detectCodexPath,
+  detectDshPath,
   exportUsage,
   fitQuickWindowToContent,
   getAppSettings,
@@ -24,6 +25,7 @@ import {
   rescanClaude,
   rescanCockpit,
   rescanCodex,
+  rescanDsh,
   saveExport,
   showMainWindow,
   updateAppSettings,
@@ -34,6 +36,7 @@ vi.mock("./lib/api", () => ({
   detectCodexPath: vi.fn(),
   detectCcSwitchPath: vi.fn(),
   detectCockpitPath: vi.fn(),
+  detectDshPath: vi.fn(),
   getAppSettings: vi.fn(),
   getDashboardSummary: vi.fn(),
   getModelBreakdown: vi.fn(),
@@ -54,6 +57,7 @@ vi.mock("./lib/api", () => ({
   rescanCodex: vi.fn(),
   rescanCcSwitch: vi.fn(),
   rescanCockpit: vi.fn(),
+  rescanDsh: vi.fn(),
   saveExport: vi.fn(),
   showMainWindow: vi.fn(),
   isDesktopRuntime: vi.fn(() => false),
@@ -92,6 +96,7 @@ describe("App", () => {
       codex_home: null,
       claude_home: null,
       opencode_db_path: null,
+      dsh_home: null,
       cc_switch_db_path: null,
       cockpit_path: null,
       otel_port: null,
@@ -433,6 +438,7 @@ describe("App panels", () => {
       codex_home: null,
       claude_home: null,
       opencode_db_path: null,
+      dsh_home: null,
       cc_switch_db_path: null,
       cockpit_path: null,
       otel_port: null,
@@ -460,12 +466,38 @@ describe("App panels", () => {
     });
     // App and project share one line in the session row.
     expect(screen.getByText(/\/sanitized\/project/)).toBeInTheDocument();
+    expect(screen.getByText(/Codex ·/)).toBeInTheDocument();
 
     vi.mocked(listSessions).mockRejectedValue(new Error("核心不可用"));
     render(<App />);
     await waitFor(() => {
       expect(screen.getByText(/无法读取会话列表/)).toBeInTheDocument();
     });
+  });
+
+  it("labels DeepSeek Harness sessions instead of showing the raw id", async () => {
+    vi.mocked(listSessions).mockResolvedValue({
+      sessions: [
+        {
+          session: {
+            ...session.session,
+            id: "dsh-session:def",
+            app: "deepseek_harness",
+            project_path: "/sanitized/dsh-project",
+            title: "Fixture DSH session",
+          },
+          totals,
+        },
+      ],
+      total: 1,
+    });
+    window.history.pushState({}, "", "/sessions");
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Fixture DSH session")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/DeepSeek Harness ·/)).toBeInTheDocument();
   });
 
   it("shows a session's request timeline, and says so when the id is unknown", async () => {
@@ -596,6 +628,26 @@ describe("App panels", () => {
     expect(screen.getByText("Codex Detected")).toBeInTheDocument();
   });
 
+  it("detects the DeepSeek Harness session root from the dashboard", async () => {
+    vi.mocked(detectDshPath).mockResolvedValue({
+      source_id: "dsh-session",
+      detected: true,
+      path_or_endpoint: "/sanitized/.dsh/sessions",
+      detected_version: "jsonl-v0",
+      message: null,
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "检测 DSH" }));
+    await waitFor(() => {
+      expect(
+        screen.getByText("已检测到 DeepSeek Harness 会话目录"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText("DSH Detected")).toBeInTheDocument();
+    expect(detectDshPath).toHaveBeenCalledWith(null);
+  });
+
   it("scans every source independently and reports partial failure", async () => {
     const report = {
       inserted_events: 3,
@@ -616,6 +668,11 @@ describe("App panels", () => {
       inserted_events: 0,
       skipped_records: 0,
       warning: "Cockpit 请求日志为空",
+    });
+    vi.mocked(rescanDsh).mockResolvedValue({
+      ...report,
+      inserted_events: 0,
+      skipped_records: 0,
     });
     render(<App />);
 
@@ -734,6 +791,39 @@ describe("App panels", () => {
       expect(screen.getByText("无法读取 Core 设置。")).toBeInTheDocument();
     });
     expect(screen.getByText("设置不可用")).toBeInTheDocument();
+  });
+
+  it("saves the DeepSeek Harness home and the retention window", async () => {
+    vi.mocked(updateAppSettings).mockImplementation(
+      async (settings) => settings,
+    );
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+
+    const dshHome = await screen.findByLabelText("DeepSeek Harness Home");
+    fireEvent.change(dshHome, { target: { value: "/sanitized/.dsh" } });
+    const retention = screen.getByLabelText(/数据保留周期（天）/);
+    fireEvent.change(retention, { target: { value: "30" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("设置已保存")).toBeInTheDocument();
+    });
+    expect(updateAppSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dsh_home: "/sanitized/.dsh",
+        data_retention_days: 30,
+      }),
+    );
+
+    // A non-numeric retention value falls back to "keep everything".
+    fireEvent.change(retention, { target: { value: "abc" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => {
+      expect(updateAppSettings).toHaveBeenLastCalledWith(
+        expect.objectContaining({ data_retention_days: null }),
+      );
+    });
   });
 
   it("shows providers with their aggregates", async () => {

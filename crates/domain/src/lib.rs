@@ -25,6 +25,8 @@ pub enum AppKind {
     ClaudeCode,
     /// OpenCode TUI.
     OpenCode,
+    /// DeepSeek Harness agent sessions.
+    DeepseekHarness,
     /// A source whose app could not be determined. Never a stand-in for a
     /// specific app that simply was not checked.
     Unknown,
@@ -40,6 +42,7 @@ impl AppKind {
             Self::Codex => "codex",
             Self::ClaudeCode => "claude_code",
             Self::OpenCode => "open_code",
+            Self::DeepseekHarness => "deepseek_harness",
             Self::Unknown => "unknown",
         }
     }
@@ -859,6 +862,9 @@ pub struct AppSettings {
     pub cc_switch_db_path: Option<String>,
     /// OpenCode data directory or `opencode.db` file, read-only.
     pub opencode_db_path: Option<String>,
+    /// DeepSeek Harness home (`~/.dsh`), read-only. `None` uses the platform
+    /// default or the `DSH_HOME` environment variable.
+    pub dsh_home: Option<String>,
     /// Cockpit Tools database or directory, read-only.
     pub cockpit_path: Option<String>,
     /// Port for the OTel receiver (spec §5, not built).
@@ -1269,6 +1275,7 @@ mod tests {
             (AppKind::Codex, "codex"),
             (AppKind::ClaudeCode, "claude_code"),
             (AppKind::OpenCode, "open_code"),
+            (AppKind::DeepseekHarness, "deepseek_harness"),
             (AppKind::Unknown, "unknown"),
         ] {
             assert_eq!(value.as_str(), name);

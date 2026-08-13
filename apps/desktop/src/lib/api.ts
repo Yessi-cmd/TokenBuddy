@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type AppKind = "codex" | "claude_code" | "open_code" | "unknown";
+export type AppKind =
+  "codex" | "claude_code" | "open_code" | "deepseek_harness" | "unknown";
 export type LauncherKind =
   "direct" | "cc_switch" | "cockpit" | "observer_proxy" | "unknown";
 export type IngestSource =
@@ -247,6 +248,7 @@ export interface AppSettings {
   codex_home: string | null;
   claude_home: string | null;
   opencode_db_path: string | null;
+  dsh_home: string | null;
   cc_switch_db_path: string | null;
   cockpit_path: string | null;
   otel_port: number | null;
@@ -576,6 +578,33 @@ export function detectOpenCodePath(
     "detect_opencode_path",
     `/api/detect-opencode${queryString({ opencode_db: opencodeDb })}`,
     { opencodeDb },
+  );
+}
+
+export function detectDshPath(
+  dshHome: string | null,
+): Promise<DetectionResult> {
+  return request<DetectionResult>(
+    "detect_dsh_path",
+    `/api/detect-dsh${queryString({ dsh_home: dshHome })}`,
+    { dshHome },
+  );
+}
+
+export function rescanDsh(dshHome: string | null): Promise<RescanResult> {
+  return request<RescanResult>(
+    "rescan_dsh",
+    "/api/rescan-dsh",
+    {
+      dshHome,
+    },
+    inTauri()
+      ? undefined
+      : {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dsh_home: dshHome }),
+        },
   );
 }
 

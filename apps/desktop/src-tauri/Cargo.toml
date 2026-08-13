@@ -25,6 +25,7 @@ tokenbuddy-claude-session = { path = "../../../crates/adapters/claude-session" }
 tokenbuddy-cc-switch = { path = "../../../crates/adapters/cc-switch" }
 tokenbuddy-cockpit = { path = "../../../crates/adapters/cockpit" }
 tokenbuddy-opencode = { path = "../../../crates/adapters/opencode" }
+tokenbuddy-dsh-session = { path = "../../../crates/adapters/dsh-session" }
 tokenbuddy-core = { path = "../../../crates/core" }
 tokenbuddy-domain.workspace = true
 tokenbuddy-storage.workspace = true

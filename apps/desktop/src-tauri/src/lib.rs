@@ -35,6 +35,7 @@ use tokenbuddy_domain::{
     AppSettings, DashboardSummary, DetectionResult, ExportResult, QuickSummary, SessionDetail,
     SessionPage, UsageFilters,
 };
+use tokenbuddy_dsh_session::{DshSessionAdapter, default_dsh_home};
 use tokenbuddy_opencode::{OpenCodeAdapter, default_opencode_db};
 use web::{AutostartCallback, LocalWebApiStatus, LocalWebServer};
 
@@ -476,6 +477,28 @@ fn rescan_opencode(
     state
         .core
         .rescan_opencode(normalized_path(opencode_db))
+        .map_err(core_error)
+}
+
+#[tauri::command]
+fn detect_dsh_path(
+    state: State<'_, AppState>,
+    dsh_home: Option<String>,
+) -> Result<DetectionResult, String> {
+    if let Some(home) = normalized_path(dsh_home) {
+        return Ok(DshSessionAdapter::new(home).detect_sync());
+    }
+    state.core.detect_dsh_path().map_err(core_error)
+}
+
+#[tauri::command]
+fn rescan_dsh(
+    state: State<'_, AppState>,
+    dsh_home: Option<String>,
+) -> Result<ImportReport, String> {
+    state
+        .core
+        .rescan_dsh(normalized_path(dsh_home))
         .map_err(core_error)
 }
 
@@ -1180,6 +1203,7 @@ pub fn run() {
                 CoreConfig::new(database_path, default_codex_home())
                     .with_claude_home(default_claude_home())
                     .with_opencode_db(default_opencode_db())
+                    .with_dsh_home(default_dsh_home())
                     .with_cc_switch_db(default_cc_switch_db())
                     .with_cockpit_db(default_cockpit_db())
                     .with_official_quota_enabled(true),
@@ -1282,6 +1306,8 @@ pub fn run() {
             rescan_cockpit,
             detect_opencode_path,
             rescan_opencode,
+            detect_dsh_path,
+            rescan_dsh,
             start_local_web_api,
             stop_local_web_api,
             get_local_web_api_status,

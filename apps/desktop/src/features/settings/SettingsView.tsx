@@ -15,6 +15,7 @@ const defaultAppSettings: AppSettings = {
   codex_home: null,
   claude_home: null,
   opencode_db_path: null,
+  dsh_home: null,
   cc_switch_db_path: null,
   cockpit_path: null,
   otel_port: null,
@@ -60,6 +61,7 @@ export function SettingsView() {
       | "codex_home"
       | "claude_home"
       | "opencode_db_path"
+      | "dsh_home"
       | "cc_switch_db_path"
       | "cockpit_path",
   ) {
@@ -87,6 +89,7 @@ export function SettingsView() {
         codex_home: settings.codex_home?.trim() || null,
         claude_home: settings.claude_home?.trim() || null,
         opencode_db_path: settings.opencode_db_path?.trim() || null,
+        dsh_home: settings.dsh_home?.trim() || null,
         cc_switch_db_path: settings.cc_switch_db_path?.trim() || null,
         cockpit_path: settings.cockpit_path?.trim() || null,
       });
@@ -155,6 +158,16 @@ export function SettingsView() {
             }
           />
           <SettingsField
+            id="settings-dsh-home"
+            label="DeepSeek Harness Home"
+            value={settings.dsh_home}
+            onChange={(value) => setSettings({ ...settings, dsh_home: value })}
+            placeholder="留空使用 ~/.dsh（或 $DSH_HOME）"
+            onBrowse={() =>
+              browse("directory", "选择 DeepSeek Harness Home", "dsh_home")
+            }
+          />
+          <SettingsField
             id="settings-cc-switch"
             label="CC Switch DB"
             value={settings.cc_switch_db_path}
@@ -206,6 +219,32 @@ export function SettingsView() {
             />
             <small className="settings-help">
               可接收 OTLP/HTTP traces；默认关闭，不需要 Collector。
+            </small>
+          </label>
+          <label className="settings-field" htmlFor="settings-retention-days">
+            <span>数据保留周期（天）</span>
+            <input
+              id="settings-retention-days"
+              type="number"
+              min={1}
+              inputMode="numeric"
+              value={settings.data_retention_days ?? ""}
+              onChange={(event) => {
+                const value = event.target.value.trim();
+                const days = value ? Number(value) : null;
+                setSettings({
+                  ...settings,
+                  data_retention_days:
+                    days !== null && Number.isInteger(days) && days >= 1
+                      ? days
+                      : null,
+                });
+              }}
+              placeholder="留空永久保留"
+            />
+            <small className="settings-help">
+              超过该天数的用量事件、会话和额度快照会在下一次导入时清理； 留空或
+              0 表示永久保留。
             </small>
           </label>
         </div>

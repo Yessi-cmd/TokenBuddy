@@ -18,6 +18,7 @@ use tokenbuddy_cockpit::CockpitAdapter;
 use tokenbuddy_codex_session::CodexSessionAdapter;
 use tokenbuddy_core::Core;
 use tokenbuddy_domain::{AppKind, PrecisionLevel, UsageFilters};
+use tokenbuddy_dsh_session::DshSessionAdapter;
 use tokenbuddy_opencode::OpenCodeAdapter;
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
@@ -130,6 +131,7 @@ struct RescanRequest {
     cc_switch_db: Option<String>,
     cockpit_db: Option<String>,
     opencode_db: Option<String>,
+    dsh_home: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -528,6 +530,26 @@ fn route_request_with_autostart(
                 Err(error) => api_error(format!("invalid rescan request: {error}")),
             }
         }
+        ("GET", "/api/detect-dsh") => {
+            let detection = query_value(query, "dsh_home")
+                .filter(|value| !value.trim().is_empty())
+                .map(|path| DshSessionAdapter::new(path).detect_sync());
+            match detection {
+                Some(result) => json_response(200, &result),
+                None => core
+                    .detect_dsh_path()
+                    .map_or_else(api_error, |result| json_response(200, &result)),
+            }
+        }
+        ("POST", "/api/rescan-dsh") => {
+            let body = serde_json::from_slice::<RescanRequest>(&request.body);
+            match body {
+                Ok(body) => core
+                    .rescan_dsh(normalize_path(body.dsh_home))
+                    .map_or_else(api_error, |report| json_response(200, &report)),
+                Err(error) => api_error(format!("invalid rescan request: {error}")),
+            }
+        }
         ("PUT", "/api/settings") | ("POST", "/api/settings") => {
             match serde_json::from_slice::<tokenbuddy_domain::AppSettings>(&request.body) {
                 Ok(settings) => match core.get_app_settings() {
@@ -668,6 +690,8 @@ fn usage_filters_from_query(query: &str) -> UsageFilters {
         app: query_value(query, "app").and_then(|value| match value.as_str() {
             "codex" => Some(AppKind::Codex),
             "claude_code" => Some(AppKind::ClaudeCode),
+            "open_code" => Some(AppKind::OpenCode),
+            "deepseek_harness" => Some(AppKind::DeepseekHarness),
             "unknown" => Some(AppKind::Unknown),
             _ => None,
         }),

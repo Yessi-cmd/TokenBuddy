@@ -36,6 +36,9 @@ use tokenbuddy_domain::{
     ExportResult, ImportBatch, QuickSummary, SessionDetail, SessionPage, SourceRecord,
     UsageAdapter, UsageEventPage, UsageFilters,
 };
+use tokenbuddy_dsh_session::{
+    DESCRIPTOR as DSH_DESCRIPTOR, DshSessionAdapter, SOURCE_ID as DSH_SOURCE_ID,
+};
 use tokenbuddy_official_quota::{
     CURSOR_RESOURCE_ID as OFFICIAL_QUOTA_CURSOR_RESOURCE_ID,
     DEFAULT_BASE_URL as OFFICIAL_QUOTA_DEFAULT_BASE_URL, DESCRIPTOR as OFFICIAL_QUOTA_DESCRIPTOR,
@@ -65,6 +68,7 @@ pub const ADAPTER_DESCRIPTORS: &[AdapterDescriptor] = &[
     CC_SWITCH_DESCRIPTOR,
     COCKPIT_DESCRIPTOR,
     OTEL_DESCRIPTOR,
+    DSH_DESCRIPTOR,
 ];
 
 /// How to start the Core.
@@ -82,6 +86,8 @@ pub struct CoreConfig {
     pub claude_home: Option<PathBuf>,
     /// OpenCode database to use when the settings have none.
     pub opencode_db: Option<PathBuf>,
+    /// DeepSeek Harness home to use when the settings have none.
+    pub dsh_home: Option<PathBuf>,
     /// CC-Switch database to use when the settings have none.
     pub cc_switch_db: Option<PathBuf>,
     /// Cockpit database to use when the settings have none.
@@ -111,6 +117,7 @@ impl CoreConfig {
             codex_home,
             claude_home: None,
             opencode_db: None,
+            dsh_home: None,
             cc_switch_db: None,
             cockpit_db: None,
             official_quota_enabled: false,
@@ -132,6 +139,12 @@ impl CoreConfig {
     /// Set the fallback OpenCode database path.
     pub fn with_opencode_db(mut self, opencode_db: Option<PathBuf>) -> Self {
         self.opencode_db = opencode_db;
+        self
+    }
+
+    /// Set the fallback DeepSeek Harness home.
+    pub fn with_dsh_home(mut self, dsh_home: Option<PathBuf>) -> Self {
+        self.dsh_home = dsh_home;
         self
     }
 
@@ -282,6 +295,7 @@ pub struct Core {
     codex_home: RwLock<Option<PathBuf>>,
     claude_home: RwLock<Option<PathBuf>>,
     opencode_db: RwLock<Option<PathBuf>>,
+    dsh_home: RwLock<Option<PathBuf>>,
     cc_switch_db: RwLock<Option<PathBuf>>,
     cockpit_db: RwLock<Option<PathBuf>>,
     official_quota_enabled: bool,
@@ -328,6 +342,13 @@ impl Core {
                 .map(|path| path.to_string_lossy().into_owned());
             settings_changed = true;
         }
+        if settings.dsh_home.is_none() && config.dsh_home.is_some() {
+            settings.dsh_home = config
+                .dsh_home
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
+            settings_changed = true;
+        }
         if settings_changed {
             database.save_app_settings(&settings)?;
         }
@@ -346,6 +367,11 @@ impl Core {
             .as_deref()
             .map(PathBuf::from)
             .or(config.opencode_db);
+        let dsh_home = settings
+            .dsh_home
+            .as_deref()
+            .map(PathBuf::from)
+            .or(config.dsh_home);
         let cc_switch_db = settings
             .cc_switch_db_path
             .as_deref()
@@ -365,6 +391,7 @@ impl Core {
             codex_home: RwLock::new(codex_home),
             claude_home: RwLock::new(claude_home),
             opencode_db: RwLock::new(opencode_db),
+            dsh_home: RwLock::new(dsh_home),
             cc_switch_db: RwLock::new(cc_switch_db),
             cockpit_db: RwLock::new(cockpit_db),
             official_quota_enabled: config.official_quota_enabled,
@@ -489,6 +516,52 @@ impl Core {
             self.set_claude_home(Some(claude_home))?;
         }
         self.refresh_once()
+    }
+
+    /// Import now, optionally pointing DeepSeek Harness at a new home first.
+    pub fn rescan_dsh(&self, dsh_home: Option<PathBuf>) -> Result<ImportReport, CoreError> {
+        if let Some(dsh_home) = dsh_home {
+            self.set_dsh_home(Some(dsh_home))?;
+        }
+        self.refresh_once()
+    }
+
+    /// Point the DeepSeek Harness adapter at a home, or `None` to disable it.
+    /// Persists the choice and wakes the worker.
+    pub fn set_dsh_home(&self, dsh_home: Option<PathBuf>) -> Result<(), CoreError> {
+        let mut settings = self.get_app_settings()?;
+        settings.dsh_home = dsh_home
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        self.database_lock()?.save_app_settings(&settings)?;
+        *self
+            .dsh_home
+            .write()
+            .map_err(|_| CoreError::Lock("DeepSeek Harness home"))? = dsh_home;
+        self.control.wake();
+        Ok(())
+    }
+
+    /// The configured DeepSeek Harness home, if any.
+    pub fn dsh_home(&self) -> Result<Option<PathBuf>, CoreError> {
+        self.dsh_home
+            .read()
+            .map(|path| path.clone())
+            .map_err(|_| CoreError::Lock("DeepSeek Harness home"))
+    }
+
+    /// Whether the configured DeepSeek Harness home holds a session root.
+    pub fn detect_dsh_path(&self) -> Result<DetectionResult, CoreError> {
+        let Some(home) = self.dsh_home()? else {
+            return Ok(DetectionResult {
+                source_id: DSH_SOURCE_ID.to_owned(),
+                detected: false,
+                path_or_endpoint: None,
+                detected_version: None,
+                message: Some("未配置 DeepSeek Harness Home".to_owned()),
+            });
+        };
+        Ok(DshSessionAdapter::new(home).detect_sync())
     }
 
     /// Import now, optionally pointing CC-Switch at a new database first.
@@ -715,6 +788,11 @@ impl Core {
             .write()
             .map_err(|_| CoreError::Lock("OpenCode database"))? =
             settings.opencode_db_path.map(PathBuf::from);
+        *self
+            .dsh_home
+            .write()
+            .map_err(|_| CoreError::Lock("DeepSeek Harness home"))? =
+            settings.dsh_home.map(PathBuf::from);
         *self
             .cc_switch_db
             .write()
@@ -995,6 +1073,11 @@ impl Core {
         {
             paths.push(path);
         }
+        if let Some(home) = self.dsh_home()?
+            && let Some(path) = watch_target(&home, "sessions")
+        {
+            paths.push(path);
+        }
         paths.sort();
         paths.dedup();
         Ok(paths)
@@ -1041,6 +1124,13 @@ impl Core {
             // instead of freezing on the last healthy state.
             let adapter = OpenCodeAdapter::new(db_path);
             self.import_opencode(adapter, &mut state)?;
+        }
+        if let Some(home) = self.dsh_home()? {
+            // DeepSeek Harness is also a token source: a missing session root
+            // resolves to `not_found` health instead of freezing on the last
+            // healthy state.
+            let adapter = DshSessionAdapter::new(home);
+            self.import_dsh(adapter, &mut state)?;
         }
 
         // CC-Switch and Cockpit are optional and additive: import each only when
@@ -1183,6 +1273,24 @@ impl Core {
                 state.has_error = true;
                 state.warnings.push(message.clone());
                 self.record_source_error(OPENCODE_DESCRIPTOR, db_path, message)
+            }
+        }
+    }
+
+    fn import_dsh(
+        &self,
+        adapter: DshSessionAdapter,
+        state: &mut RefreshState,
+    ) -> Result<(), CoreError> {
+        let home = adapter.dsh_home().to_owned();
+        let cursors = self.database_lock()?.list_import_cursors(DSH_SOURCE_ID)?;
+        match adapter.import_history_sync(&cursors) {
+            Ok(batch) => self.apply_batch("DeepSeek Harness", batch, state),
+            Err(error) => {
+                let message = format!("DeepSeek Harness 导入失败：{error}");
+                state.has_error = true;
+                state.warnings.push(message.clone());
+                self.record_source_error(DSH_DESCRIPTOR, home, message)
             }
         }
     }
@@ -1588,7 +1696,8 @@ mod tests {
                 "opencode",
                 "cc-switch",
                 "cockpit",
-                "otel-http"
+                "otel-http",
+                "dsh-session"
             ]
         );
         assert!(
@@ -1624,7 +1733,8 @@ mod tests {
                 "openai-official-quota",
                 "cc-switch",
                 "cockpit",
-                "otel-http"
+                "otel-http",
+                "dsh-session"
             ]
         );
     }

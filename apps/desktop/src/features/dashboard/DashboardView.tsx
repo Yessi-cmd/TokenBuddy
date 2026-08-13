@@ -5,6 +5,7 @@ import {
   detectClaudePath,
   detectCockpitPath,
   detectCodexPath,
+  detectDshPath,
   exportUsage,
   getDashboardSummary,
   getModelBreakdown,
@@ -17,6 +18,7 @@ import {
   rescanClaude,
   rescanCockpit,
   rescanCodex,
+  rescanDsh,
   saveExport,
   type DashboardSummary,
   type DetectionResult,
@@ -39,6 +41,7 @@ import {
   type DashboardFilterForm,
 } from "../../lib/filters";
 import {
+  appLabel,
   describeError,
   formatCost,
   formatPercent,
@@ -58,6 +61,7 @@ export function DashboardView() {
   const [claudeHome, setClaudeHome] = useState("");
   const [ccSwitchDb, setCcSwitchDb] = useState("");
   const [cockpitDb, setCockpitDb] = useState("");
+  const [dshHome, setDshHome] = useState("");
   const [codexDetection, setCodexDetection] = useState<DetectionResult | null>(
     null,
   );
@@ -67,6 +71,9 @@ export function DashboardView() {
     useState<DetectionResult | null>(null);
   const [cockpitDetection, setCockpitDetection] =
     useState<DetectionResult | null>(null);
+  const [dshDetection, setDshDetection] = useState<DetectionResult | null>(
+    null,
+  );
   const [status, setStatus] = useState("正在连接本地数据层…");
   // Two error slots on purpose. The overview reloads every few seconds and on
   // every scan, and its success path used to clear whatever was on screen —
@@ -232,17 +239,39 @@ export function DashboardView() {
     }
   }
 
+  async function handleDetectDsh() {
+    try {
+      const nextDetection = await detectDshPath(dshHome.trim() || null);
+      setDshDetection(nextDetection);
+      setStatus(
+        nextDetection.detected
+          ? "已检测到 DeepSeek Harness 会话目录"
+          : "未检测到 DeepSeek Harness 会话目录",
+      );
+      setActionError(null);
+    } catch (cause) {
+      console.error("检测 DeepSeek Harness 失败", cause);
+      setActionError(`无法检测 DeepSeek Harness：${describeError(cause)}`);
+    }
+  }
+
   async function handleScan() {
     setIsScanning(true);
     // Scan each source independently so one source failing does not discard the
     // others' results or get misreported as the wrong source's failure.
-    const [codexOutcome, claudeOutcome, ccSwitchOutcome, cockpitOutcome] =
-      await Promise.allSettled([
-        rescanCodex(codexHome.trim() || null),
-        rescanClaude(claudeHome.trim() || null),
-        rescanCcSwitch(ccSwitchDb.trim() || null),
-        rescanCockpit(cockpitDb.trim() || null),
-      ]);
+    const [
+      codexOutcome,
+      claudeOutcome,
+      ccSwitchOutcome,
+      cockpitOutcome,
+      dshOutcome,
+    ] = await Promise.allSettled([
+      rescanCodex(codexHome.trim() || null),
+      rescanClaude(claudeHome.trim() || null),
+      rescanCcSwitch(ccSwitchDb.trim() || null),
+      rescanCockpit(cockpitDb.trim() || null),
+      rescanDsh(dshHome.trim() || null),
+    ]);
     let inserted = 0;
     let reconciled = 0;
     let skipped = 0;
@@ -252,6 +281,7 @@ export function DashboardView() {
       ["Claude", claudeOutcome],
       ["CC-Switch", ccSwitchOutcome],
       ["Cockpit", cockpitOutcome],
+      ["DeepSeek Harness", dshOutcome],
     ] as const) {
       if (outcome.status === "fulfilled") {
         inserted += outcome.value.inserted_events;
@@ -317,7 +347,11 @@ export function DashboardView() {
   }
 
   const hasSourceDetections = Boolean(
-    codexDetection || claudeDetection || ccSwitchDetection || cockpitDetection,
+    codexDetection ||
+    claudeDetection ||
+    ccSwitchDetection ||
+    cockpitDetection ||
+    dshDetection,
   );
 
   return (
@@ -358,8 +392,9 @@ export function DashboardView() {
             数据源
           </p>
           <p className="source-description">
-            当前只读导入 Codex 与 Claude Session JSONL；未知值保持
-            Unavailable，不会被折算成 0。
+            只读导入 Codex、Claude Code、OpenCode、DeepSeek Harness、CC-Switch
+            与 Cockpit；未知值保持 Unavailable，不会被折算成
+            0。路径留空时使用系统默认值，保存于设置页。
           </p>
         </div>
         <div className="source-controls">
@@ -415,6 +450,20 @@ export function DashboardView() {
           >
             检测 Cockpit
           </button>
+          <label htmlFor="dsh-home">DSH Home</label>
+          <input
+            id="dsh-home"
+            value={dshHome}
+            onChange={(event) => setDshHome(event.target.value)}
+            placeholder="留空使用 ~/.dsh"
+          />
+          <button
+            className="quiet-button"
+            type="button"
+            onClick={handleDetectDsh}
+          >
+            检测 DSH
+          </button>
         </div>
         {hasSourceDetections ? (
           <div className="source-detections">
@@ -453,6 +502,13 @@ export function DashboardView() {
                 }
               >
                 Cockpit {cockpitDetection.detected ? "Detected" : "Not found"}
+              </span>
+            ) : null}
+            {dshDetection ? (
+              <span
+                className={dshDetection.detected ? "detection ok" : "detection"}
+              >
+                DSH {dshDetection.detected ? "Detected" : "Not found"}
               </span>
             ) : null}
           </div>
@@ -535,6 +591,7 @@ export function DashboardView() {
               <option value="codex">Codex</option>
               <option value="claude_code">Claude Code</option>
               <option value="open_code">OpenCode</option>
+              <option value="deepseek_harness">DeepSeek Harness</option>
               <option value="unknown">Unknown</option>
             </select>
           </label>
@@ -690,7 +747,7 @@ export function DashboardView() {
                         row.provider_id ||
                         "供应商 Unavailable"}
                     </td>
-                    <td>{row.app}</td>
+                    <td>{appLabel(row.app)}</td>
                     <td>{formatTokens(row.totals.input_tokens_total)}</td>
                     <td>{formatTokens(row.totals.output_tokens_total)}</td>
                     <td>{formatPercent(row.totals.cache_hit_rate_percent)}</td>
@@ -729,7 +786,7 @@ export function DashboardView() {
           ) : (
             <EmptyState
               title="还没有导入会话"
-              description="确认 Codex 或 Claude Home 后点击“扫描 Codex + Claude”，TokenBuddy 会从 JSONL 增量导入。"
+              description="确认数据源路径并点击“扫描全部来源”，TokenBuddy 会增量导入各来源的用量记录。"
             />
           )}
         </div>

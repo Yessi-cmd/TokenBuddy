@@ -807,6 +807,7 @@ fn stable_session_id(app: AppKind, external: &str) -> String {
         AppKind::Codex => "codex-session",
         AppKind::ClaudeCode => "claude-code-session",
         AppKind::OpenCode => "opencode",
+        AppKind::DeepseekHarness => "dsh-session",
         AppKind::Unknown => SOURCE_ID,
     };
     format!("{source}:{}", short_hash(external))

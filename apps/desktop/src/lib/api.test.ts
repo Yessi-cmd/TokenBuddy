@@ -159,6 +159,7 @@ describe("api transport", () => {
       codex_home: "/sanitized/codex",
       claude_home: null,
       opencode_db_path: null,
+      dsh_home: null,
       cc_switch_db_path: null,
       cockpit_path: null,
       otel_port: null,

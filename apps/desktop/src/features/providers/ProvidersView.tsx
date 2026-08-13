@@ -68,6 +68,10 @@ export function ProvidersView() {
                   value={`${formatTokens(provider.totals.input_tokens_total)} / ${formatTokens(provider.totals.output_tokens_total)}`}
                 />
                 <SummaryItem
+                  label="缓存命中率"
+                  value={formatPercent(provider.totals.cache_hit_rate_percent)}
+                />
+                <SummaryItem
                   label="费用（USD）"
                   value={formatCost(provider.totals)}
                 />

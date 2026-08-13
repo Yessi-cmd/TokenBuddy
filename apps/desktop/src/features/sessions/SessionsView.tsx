@@ -8,6 +8,7 @@ import { navigate } from "../../lib/navigation";
 
 export function SessionsView() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -16,6 +17,7 @@ export function SessionsView() {
       .then((page) => {
         if (active) {
           setSessions(page.sessions);
+          setTotal(page.total);
           setError(null);
         }
       })
@@ -35,6 +37,12 @@ export function SessionsView() {
         className="panel sessions-panel route-panel"
         aria-label="会话列表"
       >
+        <div className="sessions-count-row">
+          <span className="count-label">
+            {sessions.length} 条
+            {total != null && total > sessions.length ? ` / 共 ${total}` : ""}
+          </span>
+        </div>
         {sessions.length ? (
           <div className="session-list">
             {sessions.map((session) => (
@@ -53,7 +61,7 @@ export function SessionsView() {
         ) : (
           <EmptyState
             title="还没有导入会话"
-            description="确认 Codex Home 后开始增量导入。"
+            description="在总览页点击“扫描全部来源”，或在设置页配置各数据源路径后保存，TokenBuddy 会开始增量导入。"
           />
         )}
       </section>

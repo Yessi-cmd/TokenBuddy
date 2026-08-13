@@ -1,0 +1,14 @@
+{"type":"session","version":0,"id":"ses-dsh-main","createdAt":1786114981086,"cwd":"/sanitized/demo","delegationDepth":0}
+{"type":"turn/start","seq":0,"time":1786114981086,"data":{"turn":1}}
+{"type":"request/context","seq":1,"time":1786114981087,"data":{"provider":"deepseek-official","model":"deepseek-v4-pro"}}
+{"type":"request/header","seq":2,"time":1786114981088,"data":{"config":{"provider":"deepseek-official","model":"deepseek-v4-pro"}}}
+{"type":"user/message","seq":3,"time":1786114981089,"data":{"role":"user","content":"sanitized-prompt-text"},"surfaceOp":"append"}
+{"type":"assistant/chunk","seq":4,"time":1786114981090,"data":{"turn":1,"step":1,"chunk":{"type":"text-delta","text":"sanitized"}}}
+{"type":"assistant/message","seq":5,"time":1786114981091,"data":{"turn":1,"step":1,"message":{"role":"assistant","content":"sanitized-completion-text"},"usage":{"inputTokens":1200,"outputTokens":340,"cacheReadTokens":800,"cacheWriteTokens":0,"reasoningTokens":120}},"surfaceOp":"append"}
+{"type":"step/end","seq":6,"time":1786114981092,"data":{"turn":1,"step":1}}
+{"type":"turn/end","seq":7,"time":1786114981093,"data":{"turn":1,"reason":{"kind":"completed"}}}
+{"type":"turn/start","seq":8,"time":1786114982094,"data":{"turn":2}}
+{"type":"step/start","seq":9,"time":1786114982095,"data":{"turn":2,"step":1}}
+{"type":"assistant/message","seq":10,"time":1786114982096,"data":{"turn":2,"step":1,"message":{"role":"assistant","content":"sanitized-completion-text-2"},"usage":{"inputTokens":1500,"outputTokens":90,"reasoningTokens":30}},"surfaceOp":"append"}
+{"type":"step/end","seq":11,"time":1786114982097,"data":{"turn":2,"step":1}}
+{"type":"turn/end","seq":12,"time":1786114982098,"data":{"turn":2,"reason":{"kind":"completed"}}}

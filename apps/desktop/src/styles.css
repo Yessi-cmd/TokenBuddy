@@ -400,6 +400,62 @@ h3 {
   color: var(--mint);
 }
 
+/* Per-source health badge on the Sources page: a colored dot plus the stored
+   status, so a failing adapter reads as failing and a missing path reads as
+   missing instead of everything being the same gray pill. */
+.health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.health-badge::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--quiet);
+  content: "";
+}
+
+.health-badge.ok {
+  border-color: rgba(94, 208, 155, 0.3);
+  color: var(--mint);
+}
+
+.health-badge.ok::before {
+  background: var(--mint-strong);
+  box-shadow: 0 0 0 4px rgba(94, 208, 155, 0.12);
+}
+
+.health-badge.error {
+  border-color: rgba(241, 201, 137, 0.32);
+  color: var(--warning);
+}
+
+.health-badge.error::before {
+  background: var(--warning);
+  box-shadow: 0 0 0 4px rgba(241, 201, 137, 0.12);
+}
+
+.health-badge.missing {
+  color: var(--quiet);
+}
+
+/* The sessions page has no hero heading; the count sits on its own quiet row
+   above the list instead of floating beside removed page chrome. */
+.sessions-count-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 16px 20px 4px;
+}
+
 .dashboard-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

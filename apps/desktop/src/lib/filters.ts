@@ -23,7 +23,8 @@ export const emptyTotals: UsageTotals = {
 export type DashboardFilterForm = {
   period_start: string;
   period_end: string;
-  app: "" | "codex" | "claude_code" | "open_code" | "unknown";
+  app:
+    "" | "codex" | "claude_code" | "open_code" | "deepseek_harness" | "unknown";
   provider_id: string;
   account_id: string;
   model: string;

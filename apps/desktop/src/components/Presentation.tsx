@@ -6,7 +6,12 @@ import type {
   SessionSummary,
   UsageEvent,
 } from "../lib/api";
-import { formatDate, formatTokens, precisionLabel } from "../lib/format";
+import {
+  appLabel,
+  formatDate,
+  formatTokens,
+  precisionLabel,
+} from "../lib/format";
 
 export function MetricCard({
   label,
@@ -47,7 +52,7 @@ export function SessionRow({
       <span className="session-row-main">
         <span className="session-title">{title}</span>
         <span className="session-meta">
-          {summary.session.app} ·{" "}
+          {appLabel(summary.session.app)} ·{" "}
           {summary.session.project_path || "项目路径 Unavailable"}
         </span>
       </span>

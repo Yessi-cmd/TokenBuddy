@@ -1,0 +1,6 @@
+{"type":"session","version":0,"id":"ses-dsh-child","createdAt":1786114983086,"cwd":"/sanitized/demo","parentSession":"ses-dsh-main","origin":"subagent","delegationDepth":1}
+{"type":"turn/start","seq":0,"time":1786114983086,"data":{"turn":1}}
+{"type":"request/context","seq":1,"time":1786114983087,"data":{"provider":"deepseek-official","model":"deepseek-v4-pro"}}
+{"type":"assistant/message","seq":2,"time":1786114983088,"data":{"turn":1,"step":1,"message":{"role":"assistant","content":"sanitized-child-completion"},"usage":{"inputTokens":400,"outputTokens":60}},"surfaceOp":"append"}
+{"type":"step/end","seq":3,"time":1786114983089,"data":{"turn":1,"step":1}}
+{"type":"turn/end","seq":4,"time":1786114983090,"data":{"turn":1,"reason":{"kind":"completed"}}}

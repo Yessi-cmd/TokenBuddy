@@ -511,7 +511,7 @@ impl Database {
             .query_row(
                 "SELECT codex_home, claude_home, cc_switch_db_path, cockpit_path,
                         otel_port, auto_start, proxy_enabled, save_request_metadata,
-                        data_retention_days, opencode_db_path
+                        data_retention_days, opencode_db_path, dsh_home
                  FROM app_settings WHERE id = 1",
                 [],
                 app_settings_from_row,
@@ -527,8 +527,8 @@ impl Database {
             "INSERT INTO app_settings (
                  id, codex_home, claude_home, cc_switch_db_path, cockpit_path,
                  otel_port, auto_start, proxy_enabled, save_request_metadata,
-                 data_retention_days, opencode_db_path
-             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 data_retention_days, opencode_db_path, dsh_home
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
                  codex_home = excluded.codex_home,
                  claude_home = excluded.claude_home,
@@ -539,7 +539,8 @@ impl Database {
                  proxy_enabled = excluded.proxy_enabled,
                  save_request_metadata = excluded.save_request_metadata,
                  data_retention_days = excluded.data_retention_days,
-                 opencode_db_path = excluded.opencode_db_path",
+                 opencode_db_path = excluded.opencode_db_path,
+                 dsh_home = excluded.dsh_home",
             params![
                 settings.codex_home,
                 settings.claude_home,
@@ -551,6 +552,7 @@ impl Database {
                 bool_to_i64(settings.save_request_metadata),
                 settings.data_retention_days.map(i64::from),
                 settings.opencode_db_path,
+                settings.dsh_home,
             ],
         )?;
         // Request metadata is an explicit opt-in. Clearing the setting must
@@ -2186,8 +2188,10 @@ fn provider_family(model: Option<&str>, app: AppKind) -> (&'static str, &'static
         AppKind::Codex => ("openai", "OpenAI"),
         AppKind::ClaudeCode => ("anthropic", "Anthropic"),
         // OpenCode models are usually served through user-configured relays, so
-        // a model name never implies a first-party vendor here.
-        AppKind::OpenCode => ("unknown", "Unknown"),
+        // a model name never implies a first-party vendor here. DeepSeek
+        // Harness events carry the provider their routing stated, so a model
+        // name alone must not guess one either.
+        AppKind::OpenCode | AppKind::DeepseekHarness => ("unknown", "Unknown"),
         AppKind::Unknown => ("unknown", "Unknown"),
     }
 }
@@ -2363,6 +2367,7 @@ fn app_settings_from_row(row: &Row<'_>) -> rusqlite::Result<AppSettings> {
         save_request_metadata: row.get::<_, i64>(7)? != 0,
         data_retention_days: optional_u32(row.get(8)?, "data_retention_days")?,
         opencode_db_path: row.get(9)?,
+        dsh_home: row.get(10)?,
     })
 }
 
@@ -2574,6 +2579,7 @@ fn app_from_str(value: String) -> Result<AppKind> {
         "codex" => Ok(AppKind::Codex),
         "claude_code" => Ok(AppKind::ClaudeCode),
         "open_code" => Ok(AppKind::OpenCode),
+        "deepseek_harness" => Ok(AppKind::DeepseekHarness),
         "unknown" => Ok(AppKind::Unknown),
         _ => Err(StorageError::UnknownEnum {
             field: "app".to_owned(),

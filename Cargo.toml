@@ -9,6 +9,7 @@ members = [
     "crates/adapters/cockpit",
     "crates/adapters/opencode",
     "crates/adapters/official-quota",
+    "crates/adapters/dsh-session",
     "crates/adapters/sqlite-source",
     "crates/otel-receiver",
     "crates/core",
@@ -40,3 +41,4 @@ tokenbuddy-domain = { path = "crates/domain" }
 tokenbuddy-sqlite-source = { path = "crates/adapters/sqlite-source" }
 tokenbuddy-opencode = { path = "crates/adapters/opencode" }
 tokenbuddy-storage = { path = "crates/storage" }
+zstd = "0.13.3"

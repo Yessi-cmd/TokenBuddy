@@ -53,6 +53,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "0010_claude_streamed_usage_reimport",
         include_str!("../migrations/0010_claude_streamed_usage_reimport.sql"),
     ),
+    (
+        11,
+        "0011_dsh_home",
+        include_str!("../migrations/0011_dsh_home.sql"),
+    ),
 ];
 
 pub fn run(conn: &mut Connection) -> Result<()> {

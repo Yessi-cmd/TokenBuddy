@@ -5,6 +5,19 @@ import { PageFrame } from "../../components/Navigation";
 import { EmptyState, SummaryItem } from "../../components/Presentation";
 import { formatDate } from "../../lib/format";
 
+function healthClass(status: string | null): string {
+  switch (status) {
+    case "healthy":
+      return "health-badge ok";
+    case "error":
+      return "health-badge error";
+    case "not_found":
+      return "health-badge missing";
+    default:
+      return "health-badge";
+  }
+}
+
 export function SourcesView() {
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +51,7 @@ export function SourcesView() {
                   <p className="section-kicker">{source.adapter_type}</p>
                   <h2>{source.display_name}</h2>
                 </div>
-                <span className="detection ok">
+                <span className={healthClass(source.health_status)}>
                   {source.health_status || "Unavailable"}
                 </span>
               </div>
@@ -61,7 +74,7 @@ export function SourcesView() {
                 />
                 <SummaryItem
                   label="最近错误"
-                  value={source.last_error || "Unavailable"}
+                  value={source.last_error || "无"}
                 />
               </dl>
             </article>
@@ -71,7 +84,7 @@ export function SourcesView() {
         <section className="panel route-panel">
           <EmptyState
             title="尚未登记数据源"
-            description="启动 Core 后会在此展示 Adapter 状态。"
+            description="启动 Core 后会在此展示各 Adapter 的健康状态。"
           />
         </section>
       )}

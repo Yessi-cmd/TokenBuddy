@@ -56,6 +56,18 @@ export function precisionLabel(level: PrecisionLevel): string {
   return labels[level];
 }
 
+export function appLabel(app: string | null | undefined): string {
+  const labels: Record<string, string> = {
+    codex: "Codex",
+    claude_code: "Claude Code",
+    open_code: "OpenCode",
+    deepseek_harness: "DeepSeek Harness",
+    unknown: "Unknown",
+  };
+  if (!app) return "应用 Unavailable";
+  return labels[app] ?? app;
+}
+
 export function authModeLabel(authMode: string): string {
   const labels: Record<string, string> = {
     chatgpt: "ChatGPT 官方登录",
