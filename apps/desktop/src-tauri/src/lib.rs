@@ -842,6 +842,28 @@ fn show_window<R: Runtime>(app: &AppHandle<R>, label: &str) {
     }
 }
 
+/// Run a window action in a later main-loop iteration instead of inside the
+/// current dispatch context.
+///
+/// On Windows the tray context menu runs its own modal loop on the main
+/// thread. Creating a WebView2 window synchronously inside a menu callback
+/// can deadlock the whole app: WebView2 environment initialization needs the
+/// message pump that the modal menu loop does not provide. Spawning first and
+/// dispatching through `run_on_main_thread` moves the window creation and
+/// show out of the menu callback, so the menu can close before the webview
+/// initializes (the same reason the quick panel's delayed hide already uses
+/// this shape). The small delay is invisible next to webview startup.
+fn deferred_on_main<R: Runtime>(
+    app: &AppHandle<R>,
+    action: impl FnOnce(&AppHandle<R>) + Send + 'static,
+) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let dispatch = app.clone();
+        let _ = dispatch.run_on_main_thread(move || action(&app));
+    });
+}
+
 fn get_or_create_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> Option<WebviewWindow<R>> {
     if let Some(window) = app.get_webview_window(label) {
         return Some(window);
@@ -858,7 +880,32 @@ fn get_or_create_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> Option<W
         "quick" => quick_window_builder(app).build(),
         _ => return None,
     };
-    result.ok()
+    match result {
+        Ok(window) => Some(window),
+        Err(error) => {
+            // The GUI subsystem has no console; an env-gated file keeps window
+            // creation failures diagnosable on real machines.
+            debug_log(&format!("window `{label}` build failed: {error}"));
+            None
+        }
+    }
+}
+
+/// Append one line to `TOKENBUDDY_LOG_FILE` when the variable is set. Used for
+/// failures that would otherwise be invisible in a tray app with no console.
+fn debug_log(message: &str) {
+    use std::io::Write;
+
+    let Some(path) = std::env::var_os("TOKENBUDDY_LOG_FILE") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{} {message}", chrono::Utc::now().to_rfc3339());
+    }
 }
 
 fn quick_window_builder<R: Runtime>(
@@ -1098,8 +1145,8 @@ fn tray_cost(provider_reported_cost: Option<f64>, estimated_cost: Option<f64>) -
 
 fn handle_menu_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
     match event.id().as_ref() {
-        "open-quick" => show_quick_window(app),
-        "open-dashboard" => show_window(app, "main"),
+        "open-quick" => deferred_on_main(app, show_quick_window),
+        "open-dashboard" => deferred_on_main(app, |app| show_window(app, "main")),
         "open-web" => {
             if let Some(state) = app.try_state::<AppState>()
                 && let Ok(mut server) = state.web_server.lock()
@@ -1143,11 +1190,11 @@ fn handle_tray_event<R: Runtime>(tray: &tauri::tray::TrayIcon<R>, event: TrayIco
             button_state: MouseButtonState::Up,
             rect,
             ..
-        } => toggle_quick_window(tray.app_handle(), rect),
+        } => deferred_on_main(tray.app_handle(), move |app| toggle_quick_window(app, rect)),
         TrayIconEvent::DoubleClick {
             button: MouseButton::Left,
             ..
-        } => show_window(tray.app_handle(), "main"),
+        } => deferred_on_main(tray.app_handle(), |app| show_window(app, "main")),
         _ => {}
     }
 }
@@ -1183,7 +1230,7 @@ fn setup_tray<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show_window(app, "main");
+            deferred_on_main(app, |app| show_window(app, "main"));
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
