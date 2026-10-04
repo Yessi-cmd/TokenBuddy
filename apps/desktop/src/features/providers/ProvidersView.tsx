@@ -1,13 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 
 import { listProviders, type ProviderSummary } from "../../lib/api";
 import { PageFrame } from "../../components/Navigation";
-import { EmptyState, SummaryItem } from "../../components/Presentation";
+import {
+  EmptyState,
+  Meter,
+  Notice,
+  SummaryItem,
+} from "../../components/Presentation";
 import { formatCost, formatPercent, formatTokens } from "../../lib/format";
 
 export function ProvidersView() {
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     let active = true;
@@ -20,6 +26,9 @@ export function ProvidersView() {
       })
       .catch(() => {
         if (active) setError("无法读取 Provider 统计。");
+      })
+      .finally(() => {
+        if (active) setIsLoading(false);
       });
     return () => {
       active = false;
@@ -28,12 +37,17 @@ export function ProvidersView() {
 
   return (
     <PageFrame>
-      {error ? <p className="notice notice-warning">{error}</p> : null}
+      {error ? <Notice>{error}</Notice> : null}
       {providers.length ? (
         <section className="route-grid" aria-label="Provider 统计">
-          {providers.map((provider) => (
-            <article className="panel route-card" key={provider.id}>
-              <div className="panel-heading route-card-heading">
+          {providers.map((provider, index) => (
+            <article
+              className="panel route-card"
+              key={provider.id}
+              data-glow
+              style={{ "--i": index } as CSSProperties}
+            >
+              <div className="route-card-heading">
                 <div>
                   <p className="section-kicker">{provider.provider_family}</p>
                   <h2>{provider.display_name}</h2>
@@ -41,6 +55,37 @@ export function ProvidersView() {
                 <span className="count-label">
                   {formatTokens(provider.request_count)} 请求
                 </span>
+              </div>
+              <div className="card-stats">
+                <div>
+                  <span>输入</span>
+                  <strong>
+                    {formatTokens(provider.totals.input_tokens_total)}
+                  </strong>
+                </div>
+                <div>
+                  <span>输出</span>
+                  <strong>
+                    {formatTokens(provider.totals.output_tokens_total)}
+                  </strong>
+                </div>
+                <div>
+                  <span>费用（USD）</span>
+                  <strong>{formatCost(provider.totals)}</strong>
+                </div>
+              </div>
+              <div className="card-meter">
+                <span>
+                  成功率
+                  <strong>
+                    {formatPercent(provider.success_rate_percent)}
+                  </strong>
+                </span>
+                <Meter
+                  percent={provider.success_rate_percent}
+                  label="成功率"
+                  tone="accent"
+                />
               </div>
               <dl className="summary-list">
                 <SummaryItem
@@ -52,10 +97,6 @@ export function ProvidersView() {
                   value={formatTokens(provider.account_count)}
                 />
                 <SummaryItem
-                  label="成功率"
-                  value={formatPercent(provider.success_rate_percent)}
-                />
-                <SummaryItem
                   label="平均延迟"
                   value={
                     provider.average_latency_ms == null
@@ -64,20 +105,17 @@ export function ProvidersView() {
                   }
                 />
                 <SummaryItem
-                  label="输入 / 输出"
-                  value={`${formatTokens(provider.totals.input_tokens_total)} / ${formatTokens(provider.totals.output_tokens_total)}`}
-                />
-                <SummaryItem
                   label="缓存命中率"
                   value={formatPercent(provider.totals.cache_hit_rate_percent)}
-                />
-                <SummaryItem
-                  label="费用（USD）"
-                  value={formatCost(provider.totals)}
                 />
               </dl>
             </article>
           ))}
+        </section>
+      ) : isLoading ? (
+        <section className="route-grid" aria-label="正在读取 Provider">
+          <div className="panel route-card skeleton-card" />
+          <div className="panel route-card skeleton-card" />
         </section>
       ) : (
         <section className="panel route-panel">

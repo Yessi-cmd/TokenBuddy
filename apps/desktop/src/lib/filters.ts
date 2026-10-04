@@ -66,6 +66,48 @@ export function initialDashboardFilterForm(): DashboardFilterForm {
   };
 }
 
+// Quick date ranges for the scope bar. `null` days means "no bound" (all time).
+export type DatePreset = { label: string; days: number | null };
+
+export const datePresets: DatePreset[] = [
+  { label: "今天", days: 1 },
+  { label: "近 7 天", days: 7 },
+  { label: "近 30 天", days: 30 },
+  { label: "全部", days: null },
+];
+
+export function presetRange(days: number | null, now = new Date()) {
+  if (days == null) return { period_start: "", period_end: "" };
+  const start = new Date(now);
+  start.setDate(start.getDate() - (days - 1));
+  return {
+    period_start: localDateInput(start),
+    period_end: localDateInput(now),
+  };
+}
+
+export function activePreset(
+  form: Pick<DashboardFilterForm, "period_start" | "period_end">,
+  now = new Date(),
+): number | null | undefined {
+  const match = datePresets.find((preset) => {
+    const range = presetRange(preset.days, now);
+    return (
+      range.period_start === form.period_start &&
+      range.period_end === form.period_end
+    );
+  });
+  return match ? match.days : undefined;
+}
+
+export const advancedFilterKeys = [
+  "precision",
+  "provider_id",
+  "account_id",
+  "model",
+  "project_path",
+] as const;
+
 export function dashboardFilters(form: DashboardFilterForm): UsageFilters {
   const periodStart = form.period_start
     ? localDayStartIso(form.period_start)

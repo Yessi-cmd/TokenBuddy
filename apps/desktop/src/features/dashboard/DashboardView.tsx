@@ -1,11 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { startPolling } from "../../lib/polling";
 
 import {
-  detectCcSwitchPath,
-  detectClaudePath,
-  detectCockpitPath,
-  detectCodexPath,
-  detectDshPath,
   exportUsage,
   getDashboardSummary,
   getModelBreakdown,
@@ -21,23 +17,28 @@ import {
   rescanDsh,
   saveExport,
   type DashboardSummary,
-  type DetectionResult,
   type ModelUsage,
   type SessionDetail,
   type SessionSummary,
   type SourceRecord,
 } from "../../lib/api";
-import { AppNavigation } from "../../components/Navigation";
+import { PageFrame, RouteLink } from "../../components/Navigation";
 import {
   EmptyState,
+  Meter,
   MetricCard,
+  Notice,
   SessionDetailView,
   SessionRow,
 } from "../../components/Presentation";
 import {
+  activePreset,
+  advancedFilterKeys,
   dashboardFilters,
+  datePresets,
   emptyTotals,
   initialDashboardFilterForm,
+  presetRange,
   type DashboardFilterForm,
 } from "../../lib/filters";
 import {
@@ -47,33 +48,20 @@ import {
   formatPercent,
   formatTokens,
 } from "../../lib/format";
+import { toast } from "../../lib/toast";
 
 export function DashboardView() {
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null);
   const [breakdown, setBreakdown] = useState<ModelUsage[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionTotal, setSessionTotal] = useState<number | null>(null);
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
   const [detail, setDetail] = useState<SessionDetail | null>(null);
-  const [codexHome, setCodexHome] = useState("");
-  const [claudeHome, setClaudeHome] = useState("");
-  const [ccSwitchDb, setCcSwitchDb] = useState("");
-  const [cockpitDb, setCockpitDb] = useState("");
-  const [dshHome, setDshHome] = useState("");
-  const [codexDetection, setCodexDetection] = useState<DetectionResult | null>(
-    null,
-  );
-  const [claudeDetection, setClaudeDetection] =
-    useState<DetectionResult | null>(null);
-  const [ccSwitchDetection, setCcSwitchDetection] =
-    useState<DetectionResult | null>(null);
-  const [cockpitDetection, setCockpitDetection] =
-    useState<DetectionResult | null>(null);
-  const [dshDetection, setDshDetection] = useState<DetectionResult | null>(
-    null,
-  );
+  // The pill only describes the data layer. Results of clicks are toasts, so a
+  // finished scan can no longer hide (or be truncated by) the connection state.
   const [status, setStatus] = useState("正在连接本地数据层…");
   // Two error slots on purpose. The overview reloads every few seconds and on
   // every scan, and its success path used to clear whatever was on screen —
@@ -81,16 +69,17 @@ export function DashboardView() {
   // user could read it. Loading owns one slot, user actions own the other.
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const error = actionError ?? loadError;
   const [isScanning, setIsScanning] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [filterForm, setFilterForm] = useState<DashboardFilterForm>(
     initialDashboardFilterForm,
   );
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [exportingFormat, setExportingFormat] = useState<"csv" | "json" | null>(
     null,
   );
   const filters = useMemo(() => dashboardFilters(filterForm), [filterForm]);
+  const desktop = isDesktopRuntime();
 
   useEffect(() => {
     let active = true;
@@ -110,6 +99,7 @@ export function DashboardView() {
         setDashboard(nextDashboard);
         setBreakdown(nextBreakdown);
         setSessions(nextSessions.sessions);
+        setSessionTotal(nextSessions.total);
         setSources(nextSources);
         setStatus("数据已从本地 SQLite 加载");
         setLoadError(null);
@@ -128,18 +118,12 @@ export function DashboardView() {
       }
     }
 
-    void loadOverview();
+    const stop = startPolling(loadOverview, 5000);
     return () => {
       active = false;
+      stop();
     };
   }, [filters, refreshVersion]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setRefreshVersion((value) => value + 1);
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, []);
 
   useEffect(() => {
     let active = true;
@@ -166,6 +150,7 @@ export function DashboardView() {
     };
   }, [selectedSessionId, refreshVersion]);
 
+  const loading = dashboard === null && loadError === null;
   const totals = dashboard?.totals ?? emptyTotals;
   const selectedSession = useMemo(
     () =>
@@ -175,90 +160,28 @@ export function DashboardView() {
   const visibleDetail =
     detail?.summary.session.id === selectedSessionId ? detail : null;
 
-  async function handleDetect() {
-    try {
-      const nextDetection = await detectCodexPath(codexHome.trim() || null);
-      setCodexDetection(nextDetection);
-      setStatus(
-        nextDetection.detected
-          ? "已检测到 Codex Session 目录"
-          : "未检测到 Codex Session 目录",
-      );
-      setActionError(null);
-    } catch (cause) {
-      console.error("检测 Codex Home 失败", cause);
-      setActionError(`无法检测 Codex Home：${describeError(cause)}`);
-    }
-  }
+  const advancedCount = advancedFilterKeys.filter(
+    (key) => filterForm[key].trim() !== "",
+  ).length;
+  const initialForm = initialDashboardFilterForm();
+  const hasActiveFilters = (
+    Object.keys(initialForm) as (keyof DashboardFilterForm)[]
+  ).some((key) => filterForm[key] !== initialForm[key]);
+  const currentPreset = activePreset(filterForm);
+  const advancedOpen = showAdvanced || advancedCount > 0;
 
-  async function handleDetectClaude() {
-    try {
-      const nextDetection = await detectClaudePath(claudeHome.trim() || null);
-      setClaudeDetection(nextDetection);
-      setStatus(
-        nextDetection.detected
-          ? "已检测到 Claude Code projects 目录"
-          : "未检测到 Claude Code projects 目录",
-      );
-      setActionError(null);
-    } catch (cause) {
-      console.error("检测 Claude Home 失败", cause);
-      setActionError(`无法检测 Claude Home：${describeError(cause)}`);
-    }
-  }
-
-  async function handleDetectCcSwitch() {
-    try {
-      const nextDetection = await detectCcSwitchPath(ccSwitchDb.trim() || null);
-      setCcSwitchDetection(nextDetection);
-      setStatus(
-        nextDetection.detected
-          ? "已检测到 CC-Switch 数据库"
-          : "未检测到 CC-Switch 数据库",
-      );
-      setActionError(null);
-    } catch (cause) {
-      console.error("检测 CC-Switch 失败", cause);
-      setActionError(`无法检测 CC-Switch：${describeError(cause)}`);
-    }
-  }
-
-  async function handleDetectCockpit() {
-    try {
-      const nextDetection = await detectCockpitPath(cockpitDb.trim() || null);
-      setCockpitDetection(nextDetection);
-      setStatus(
-        nextDetection.detected
-          ? "已检测到 Cockpit 数据库"
-          : "未检测到 Cockpit 数据库",
-      );
-      setActionError(null);
-    } catch (cause) {
-      console.error("检测 Cockpit 失败", cause);
-      setActionError(`无法检测 Cockpit：${describeError(cause)}`);
-    }
-  }
-
-  async function handleDetectDsh() {
-    try {
-      const nextDetection = await detectDshPath(dshHome.trim() || null);
-      setDshDetection(nextDetection);
-      setStatus(
-        nextDetection.detected
-          ? "已检测到 DeepSeek Harness 会话目录"
-          : "未检测到 DeepSeek Harness 会话目录",
-      );
-      setActionError(null);
-    } catch (cause) {
-      console.error("检测 DeepSeek Harness 失败", cause);
-      setActionError(`无法检测 DeepSeek Harness：${describeError(cause)}`);
-    }
+  function updateFilter<K extends keyof DashboardFilterForm>(
+    key: K,
+    value: DashboardFilterForm[K],
+  ) {
+    setFilterForm((current) => ({ ...current, [key]: value }));
   }
 
   async function handleScan() {
     setIsScanning(true);
-    // Scan each source independently so one source failing does not discard the
-    // others' results or get misreported as the wrong source's failure.
+    // Every source scans with the paths saved in Settings. Scan each source
+    // independently so one source failing does not discard the others' results
+    // or get misreported as the wrong source's failure.
     const [
       codexOutcome,
       claudeOutcome,
@@ -266,11 +189,11 @@ export function DashboardView() {
       cockpitOutcome,
       dshOutcome,
     ] = await Promise.allSettled([
-      rescanCodex(codexHome.trim() || null),
-      rescanClaude(claudeHome.trim() || null),
-      rescanCcSwitch(ccSwitchDb.trim() || null),
-      rescanCockpit(cockpitDb.trim() || null),
-      rescanDsh(dshHome.trim() || null),
+      rescanCodex(null),
+      rescanClaude(null),
+      rescanCcSwitch(null),
+      rescanCockpit(null),
+      rescanDsh(null),
     ]);
     let inserted = 0;
     let reconciled = 0;
@@ -295,8 +218,9 @@ export function DashboardView() {
         problems.push(`${label} 扫描失败：${describeError(outcome.reason)}`);
       }
     }
-    setStatus(
+    toast(
       `扫描完成：新增 ${inserted} 条事件，校正 ${reconciled} 条，跳过 ${skipped} 条记录`,
+      problems.length ? "warning" : "success",
     );
     setActionError(problems.length ? problems.join("；") : null);
     setRefreshVersion((value) => value + 1);
@@ -306,8 +230,9 @@ export function DashboardView() {
   async function handleOpenWeb() {
     try {
       const result = await openLocalWebApi();
-      setStatus(
+      toast(
         result.url ? `本地网页面板已启动：${result.url}` : "本地网页面板已启动",
+        "info",
       );
       setActionError(null);
     } catch (cause) {
@@ -323,7 +248,7 @@ export function DashboardView() {
         // WKWebView cannot trigger a blob download, so the desktop app writes
         // the file itself and tells the user where it landed.
         const savedPath = await saveExport(format, filters);
-        setStatus(`已导出到 ${savedPath}`);
+        toast(`已导出到 ${savedPath}`);
       } else {
         const result = await exportUsage(format, filters);
         const blob = new Blob([result.content], { type: result.mime_type });
@@ -333,7 +258,7 @@ export function DashboardView() {
         link.download = result.filename;
         link.click();
         URL.revokeObjectURL(url);
-        setStatus(`已导出 ${result.filename}`);
+        toast(`已导出 ${result.filename}`);
       }
       setActionError(null);
     } catch (cause) {
@@ -346,248 +271,117 @@ export function DashboardView() {
     }
   }
 
-  const hasSourceDetections = Boolean(
-    codexDetection ||
-    claudeDetection ||
-    ccSwitchDetection ||
-    cockpitDetection ||
-    dshDetection,
+  // Share bars in the breakdown are relative to the busiest row; a row whose
+  // tokens are unknown gets no bar rather than an empty one.
+  const rowTokens = (row: ModelUsage) =>
+    row.totals.input_tokens_total == null ||
+    row.totals.output_tokens_total == null
+      ? null
+      : row.totals.input_tokens_total + row.totals.output_tokens_total;
+  const maxRowTokens = Math.max(
+    0,
+    ...breakdown.map((row) => rowTokens(row) ?? 0),
   );
 
   return (
-    <main className="app-shell">
-      <header className="dashboard-toolbar" aria-label="总览工具栏">
-        <AppNavigation />
-        <div className="topbar-actions">
+    <PageFrame
+      label="总览工具栏"
+      busy={isScanning}
+      actions={
+        <>
           <span
             className="status-pill"
-            data-state={error ? "warning" : "ready"}
+            data-state={loadError ? "warning" : loading ? "loading" : "ready"}
+            title={status}
           >
             <span className="status-dot" aria-hidden="true" />
             {status}
           </span>
+          {desktop ? (
+            <button
+              className="quiet-button"
+              type="button"
+              onClick={handleOpenWeb}
+            >
+              本地网页
+            </button>
+          ) : null}
           <button
-            className="primary-button"
+            className="primary-button scan-button"
             type="button"
             onClick={handleScan}
             disabled={isScanning}
+            data-busy={isScanning || undefined}
           >
+            <ScanGlyph />
             {isScanning ? "扫描中…" : "扫描全部来源"}
           </button>
-          <button
-            className="quiet-button"
-            type="button"
-            onClick={handleOpenWeb}
-          >
-            本地网页
-          </button>
-        </div>
-      </header>
+        </>
+      }
+    >
+      {loadError ? <Notice>{loadError}</Notice> : null}
+      {actionError ? (
+        <Notice onDismiss={() => setActionError(null)}>{actionError}</Notice>
+      ) : null}
 
-      {error ? <p className="notice notice-warning">{error}</p> : null}
-
-      <section className="source-bar" aria-labelledby="source-heading">
-        <div className="source-description-block">
-          <p className="section-kicker source-kicker" id="source-heading">
-            数据源
-          </p>
-          <p className="source-description">
-            只读导入 Codex、Claude Code、OpenCode、DeepSeek Harness、CC-Switch
-            与 Cockpit；未知值保持 Unavailable，不会被折算成
-            0。路径留空时使用系统默认值，保存于设置页。
-          </p>
-        </div>
-        <div className="source-controls">
-          <label htmlFor="codex-home">Codex Home</label>
-          <input
-            id="codex-home"
-            value={codexHome}
-            onChange={(event) => setCodexHome(event.target.value)}
-            placeholder="留空使用系统默认路径"
-          />
-          <button className="quiet-button" type="button" onClick={handleDetect}>
-            检测 Codex
-          </button>
-          <label htmlFor="claude-home">Claude Home</label>
-          <input
-            id="claude-home"
-            value={claudeHome}
-            onChange={(event) => setClaudeHome(event.target.value)}
-            placeholder="留空使用系统默认路径"
-          />
-          <button
-            className="quiet-button"
-            type="button"
-            onClick={handleDetectClaude}
-          >
-            检测 Claude
-          </button>
-          <label htmlFor="cc-switch-db">CC-Switch DB</label>
-          <input
-            id="cc-switch-db"
-            value={ccSwitchDb}
-            onChange={(event) => setCcSwitchDb(event.target.value)}
-            placeholder="留空使用 ~/.cc-switch/cc-switch.db"
-          />
-          <button
-            className="quiet-button"
-            type="button"
-            onClick={handleDetectCcSwitch}
-          >
-            检测 CC-Switch
-          </button>
-          <label htmlFor="cockpit-db">Cockpit DB</label>
-          <input
-            id="cockpit-db"
-            value={cockpitDb}
-            onChange={(event) => setCockpitDb(event.target.value)}
-            placeholder="留空使用 ~/.antigravity_cockpit"
-          />
-          <button
-            className="quiet-button"
-            type="button"
-            onClick={handleDetectCockpit}
-          >
-            检测 Cockpit
-          </button>
-          <label htmlFor="dsh-home">DSH Home</label>
-          <input
-            id="dsh-home"
-            value={dshHome}
-            onChange={(event) => setDshHome(event.target.value)}
-            placeholder="留空使用 ~/.dsh"
-          />
-          <button
-            className="quiet-button"
-            type="button"
-            onClick={handleDetectDsh}
-          >
-            检测 DSH
-          </button>
-        </div>
-        {hasSourceDetections ? (
-          <div className="source-detections">
-            {codexDetection ? (
-              <span
-                className={
-                  codexDetection.detected ? "detection ok" : "detection"
+      <section className="panel scope-bar" aria-label="统计筛选">
+        <div className="scope-row">
+          <div className="segmented" role="group" aria-label="快捷时间范围">
+            {datePresets.map((preset) => (
+              <button
+                key={preset.label}
+                type="button"
+                aria-pressed={currentPreset === preset.days}
+                onClick={() =>
+                  setFilterForm((current) => ({
+                    ...current,
+                    ...presetRange(preset.days),
+                  }))
                 }
               >
-                Codex {codexDetection.detected ? "Detected" : "Not found"}
-              </span>
-            ) : null}
-            {claudeDetection ? (
-              <span
-                className={
-                  claudeDetection.detected ? "detection ok" : "detection"
-                }
-              >
-                Claude {claudeDetection.detected ? "Detected" : "Not found"}
-              </span>
-            ) : null}
-            {ccSwitchDetection ? (
-              <span
-                className={
-                  ccSwitchDetection.detected ? "detection ok" : "detection"
-                }
-              >
-                CC-Switch{" "}
-                {ccSwitchDetection.detected ? "Detected" : "Not found"}
-              </span>
-            ) : null}
-            {cockpitDetection ? (
-              <span
-                className={
-                  cockpitDetection.detected ? "detection ok" : "detection"
-                }
-              >
-                Cockpit {cockpitDetection.detected ? "Detected" : "Not found"}
-              </span>
-            ) : null}
-            {dshDetection ? (
-              <span
-                className={dshDetection.detected ? "detection ok" : "detection"}
-              >
-                DSH {dshDetection.detected ? "Detected" : "Not found"}
-              </span>
-            ) : null}
+                {preset.label}
+              </button>
+            ))}
           </div>
-        ) : null}
-      </section>
-
-      <section
-        className="panel filters-panel"
-        aria-labelledby="filters-heading"
-      >
-        <div className="panel-heading filters-heading">
-          <div>
-            <p className="section-kicker" id="filters-heading">
-              Filter & export
-            </p>
-            <h2>统计筛选</h2>
+          <div className="date-range">
+            <label>
+              <span className="sr-only">开始日期</span>
+              <input
+                type="date"
+                value={filterForm.period_start}
+                max={filterForm.period_end || undefined}
+                onChange={(event) =>
+                  updateFilter("period_start", event.target.value)
+                }
+              />
+            </label>
+            <span className="date-range-sep" aria-hidden="true">
+              →
+            </span>
+            <label>
+              <span className="sr-only">结束日期</span>
+              <input
+                type="date"
+                value={filterForm.period_end}
+                min={filterForm.period_start || undefined}
+                onChange={(event) =>
+                  updateFilter("period_end", event.target.value)
+                }
+              />
+            </label>
           </div>
-          <div className="filter-actions">
-            <button
-              className="quiet-button"
-              type="button"
-              onClick={() => setFilterForm(initialDashboardFilterForm())}
-            >
-              清除筛选
-            </button>
-            <button
-              className="quiet-button"
-              type="button"
-              onClick={() => void handleExport("csv")}
-              disabled={exportingFormat !== null}
-            >
-              {exportingFormat === "csv" ? "导出中…" : "导出 CSV"}
-            </button>
-            <button
-              className="primary-button"
-              type="button"
-              onClick={() => void handleExport("json")}
-              disabled={exportingFormat !== null}
-            >
-              {exportingFormat === "json" ? "导出中…" : "导出 JSON"}
-            </button>
-          </div>
-        </div>
-        <div className="filters-grid">
-          <label>
-            <span>开始日期</span>
-            <input
-              type="date"
-              value={filterForm.period_start}
-              onChange={(event) =>
-                setFilterForm({
-                  ...filterForm,
-                  period_start: event.target.value,
-                })
-              }
-            />
-          </label>
-          <label>
-            <span>结束日期</span>
-            <input
-              type="date"
-              value={filterForm.period_end}
-              onChange={(event) =>
-                setFilterForm({ ...filterForm, period_end: event.target.value })
-              }
-            />
-          </label>
-          <label>
-            <span>应用</span>
+          <label className="scope-select">
+            <span className="sr-only">应用</span>
             <select
               value={filterForm.app}
               onChange={(event) =>
-                setFilterForm({
-                  ...filterForm,
-                  app: event.target.value as DashboardFilterForm["app"],
-                })
+                updateFilter(
+                  "app",
+                  event.target.value as DashboardFilterForm["app"],
+                )
               }
             >
-              <option value="">全部</option>
+              <option value="">全部应用</option>
               <option value="codex">Codex</option>
               <option value="claude_code">Claude Code</option>
               <option value="open_code">OpenCode</option>
@@ -595,114 +389,206 @@ export function DashboardView() {
               <option value="unknown">Unknown</option>
             </select>
           </label>
-          <label>
-            <span>精度</span>
-            <select
-              value={filterForm.precision}
-              onChange={(event) =>
-                setFilterForm({
-                  ...filterForm,
-                  precision: event.target
-                    .value as DashboardFilterForm["precision"],
-                })
-              }
-            >
-              <option value="">全部</option>
-              <option value="verified">Verified</option>
-              <option value="exact_session">Exact session</option>
-              <option value="correlated">Correlated</option>
-              <option value="estimated">Estimated</option>
-              <option value="unavailable">Unavailable</option>
-            </select>
-          </label>
-          <label>
-            <span>Provider ID</span>
+          <label className="scope-search">
+            <span className="sr-only">搜索</span>
+            <SearchGlyph />
             <input
-              value={filterForm.provider_id}
-              onChange={(event) =>
-                setFilterForm({
-                  ...filterForm,
-                  provider_id: event.target.value,
-                })
-              }
-              placeholder="精确匹配"
-            />
-          </label>
-          <label>
-            <span>Account ID</span>
-            <input
-              value={filterForm.account_id}
-              onChange={(event) =>
-                setFilterForm({ ...filterForm, account_id: event.target.value })
-              }
-              placeholder="精确匹配"
-            />
-          </label>
-          <label>
-            <span>Model</span>
-            <input
-              value={filterForm.model}
-              onChange={(event) =>
-                setFilterForm({ ...filterForm, model: event.target.value })
-              }
-              placeholder="包含匹配"
-            />
-          </label>
-          <label>
-            <span>项目路径</span>
-            <input
-              value={filterForm.project_path}
-              onChange={(event) =>
-                setFilterForm({
-                  ...filterForm,
-                  project_path: event.target.value,
-                })
-              }
-              placeholder="包含匹配"
-            />
-          </label>
-          <label className="filter-search">
-            <span>搜索</span>
-            <input
+              type="search"
               value={filterForm.search}
-              onChange={(event) =>
-                setFilterForm({ ...filterForm, search: event.target.value })
-              }
-              placeholder="标题、项目、会话 ID、模型或请求 ID"
+              onChange={(event) => updateFilter("search", event.target.value)}
+              placeholder="搜索标题、项目、会话 ID、模型或请求 ID"
             />
           </label>
+          <button
+            className="quiet-button filter-toggle"
+            type="button"
+            aria-expanded={advancedOpen}
+            aria-controls="advanced-filters"
+            onClick={() => setShowAdvanced(!advancedOpen)}
+          >
+            更多筛选
+            {advancedCount ? (
+              <span className="filter-count">{advancedCount}</span>
+            ) : null}
+          </button>
+          <div className="scope-actions">
+            {hasActiveFilters ? (
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => {
+                  setFilterForm(initialDashboardFilterForm());
+                  setShowAdvanced(false);
+                }}
+              >
+                清除筛选
+              </button>
+            ) : null}
+            <div className="segmented" role="group" aria-label="导出">
+              <button
+                type="button"
+                onClick={() => void handleExport("csv")}
+                disabled={exportingFormat !== null}
+              >
+                {exportingFormat === "csv" ? "导出中…" : "导出 CSV"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleExport("json")}
+                disabled={exportingFormat !== null}
+              >
+                {exportingFormat === "json" ? "导出中…" : "导出 JSON"}
+              </button>
+            </div>
+          </div>
+        </div>
+        <div
+          className="scope-advanced"
+          id="advanced-filters"
+          data-open={advancedOpen || undefined}
+          inert={!advancedOpen}
+        >
+          <div className="scope-advanced-inner">
+            <label>
+              <span>精度</span>
+              <select
+                value={filterForm.precision}
+                onChange={(event) =>
+                  updateFilter(
+                    "precision",
+                    event.target.value as DashboardFilterForm["precision"],
+                  )
+                }
+              >
+                <option value="">全部</option>
+                <option value="verified">Verified</option>
+                <option value="exact_session">Exact session</option>
+                <option value="correlated">Correlated</option>
+                <option value="estimated">Estimated</option>
+                <option value="unavailable">Unavailable</option>
+              </select>
+            </label>
+            <label>
+              <span>Provider ID</span>
+              <input
+                value={filterForm.provider_id}
+                onChange={(event) =>
+                  updateFilter("provider_id", event.target.value)
+                }
+                placeholder="精确匹配"
+              />
+            </label>
+            <label>
+              <span>Account ID</span>
+              <input
+                value={filterForm.account_id}
+                onChange={(event) =>
+                  updateFilter("account_id", event.target.value)
+                }
+                placeholder="精确匹配"
+              />
+            </label>
+            <label>
+              <span>Model</span>
+              <input
+                value={filterForm.model}
+                onChange={(event) => updateFilter("model", event.target.value)}
+                placeholder="包含匹配"
+              />
+            </label>
+            <label>
+              <span>项目路径</span>
+              <input
+                value={filterForm.project_path}
+                onChange={(event) =>
+                  updateFilter("project_path", event.target.value)
+                }
+                placeholder="包含匹配"
+              />
+            </label>
+          </div>
         </div>
       </section>
 
-      <section className="dashboard-grid" aria-label="今日统计">
-        <MetricCard
-          label="输入 Token"
-          value={formatTokens(totals.input_tokens_total)}
-          tone="mint"
-        />
-        <MetricCard
-          label="缓存读取"
-          value={formatTokens(totals.cache_read_tokens)}
-        />
-        <MetricCard
-          label="缓存写入"
-          value={formatTokens(totals.cache_write_tokens)}
-        />
-        <MetricCard
-          label="输出 Token"
-          value={formatTokens(totals.output_tokens_total)}
-          tone="ink"
-        />
-        <MetricCard
-          label="推理 Token"
-          value={formatTokens(totals.reasoning_tokens)}
-        />
-        <MetricCard
-          label="缓存命中率"
-          value={formatPercent(totals.cache_hit_rate_percent)}
-        />
-        <MetricCard label="事件数" value={formatTokens(totals.event_count)} />
-        <MetricCard label="费用（USD）" value={formatCost(totals)} tone="ink" />
+      <section className="metrics" aria-label="今日统计">
+        <div className="metrics-primary">
+          <MetricCard
+            index={0}
+            label="输入 Token"
+            numeric={totals.input_tokens_total}
+            format={formatTokens}
+            tone="accent"
+            loading={loading}
+          />
+          <MetricCard
+            index={1}
+            label="输出 Token"
+            numeric={totals.output_tokens_total}
+            format={formatTokens}
+            tone="violet"
+            loading={loading}
+          />
+          <MetricCard
+            index={2}
+            label="缓存命中率"
+            numeric={totals.cache_hit_rate_percent}
+            format={formatPercent}
+            tone="accent"
+            loading={loading}
+          >
+            {loading ? null : (
+              <Meter
+                percent={totals.cache_hit_rate_percent}
+                label="缓存命中率"
+                tone="accent"
+              />
+            )}
+          </MetricCard>
+          <MetricCard
+            index={3}
+            label="费用（USD）"
+            value={formatCost(totals)}
+            tone="amber"
+            loading={loading}
+            hint={
+              totals.provider_reported_cost != null
+                ? "供应商实报"
+                : totals.estimated_cost != null
+                  ? "按价格表估算"
+                  : undefined
+            }
+          />
+        </div>
+        <div className="metrics-secondary">
+          <MetricCard
+            index={4}
+            label="缓存读取"
+            numeric={totals.cache_read_tokens}
+            format={formatTokens}
+            loading={loading}
+          />
+          <MetricCard
+            index={5}
+            label="缓存写入"
+            numeric={totals.cache_write_tokens}
+            format={formatTokens}
+            loading={loading}
+          />
+          <MetricCard
+            index={6}
+            label="推理 Token"
+            numeric={totals.reasoning_tokens}
+            format={formatTokens}
+            loading={loading}
+          />
+          <MetricCard
+            index={7}
+            label="事件数"
+            numeric={loading ? null : totals.event_count}
+            format={formatTokens}
+            loading={loading}
+          />
+        </div>
       </section>
 
       <section
@@ -711,15 +597,13 @@ export function DashboardView() {
       >
         <div className="panel-heading">
           <div>
-            <p className="section-kicker" id="breakdown-heading">
-              Model & provider
-            </p>
-            <h2>按模型 / 供应商</h2>
-            <p className="panel-note">
-              费用以 USD 展示，优先使用供应商实报；带 “~”
-              的数值是按模型价格表估算。部分会话日志未拆分缓存写入时，仅按已记录的输入、缓存命中和输出估算。
-            </p>
+            <p className="section-kicker">Model & provider</p>
+            <h2 id="breakdown-heading">按模型 / 供应商</h2>
           </div>
+          <p className="panel-note">
+            费用以 USD 展示，优先使用供应商实报；带 “~”
+            的数值按模型价格表估算。部分会话日志未拆分缓存写入时，仅按已记录的输入、缓存命中和输出估算。
+          </p>
         </div>
         {breakdown.length ? (
           <div className="table-scroll">
@@ -737,29 +621,50 @@ export function DashboardView() {
                 </tr>
               </thead>
               <tbody>
-                {breakdown.map((row) => (
-                  <tr
-                    key={`${row.model ?? "-"}|${row.provider_id ?? "-"}|${row.app}`}
-                  >
-                    <td>{row.model || "模型 Unavailable"}</td>
-                    <td>
-                      {row.provider_name ||
-                        row.provider_id ||
-                        "供应商 Unavailable"}
-                    </td>
-                    <td>{appLabel(row.app)}</td>
-                    <td>{formatTokens(row.totals.input_tokens_total)}</td>
-                    <td>{formatTokens(row.totals.output_tokens_total)}</td>
-                    <td>{formatPercent(row.totals.cache_hit_rate_percent)}</td>
-                    <td>{formatTokens(row.totals.event_count)}</td>
-                    <td>{formatCost(row.totals)}</td>
-                  </tr>
-                ))}
+                {breakdown.map((row, index) => {
+                  const tokens = rowTokens(row);
+                  return (
+                    <tr
+                      key={`${row.model ?? "-"}|${row.provider_id ?? "-"}|${row.app}`}
+                      style={{ "--i": Math.min(index, 12) } as CSSProperties}
+                    >
+                      <td className="model-cell">
+                        <span>{row.model || "模型 Unavailable"}</span>
+                        {tokens != null && maxRowTokens > 0 ? (
+                          <span
+                            className="share-bar"
+                            aria-hidden="true"
+                            style={
+                              {
+                                "--value": `${(tokens / maxRowTokens) * 100}%`,
+                              } as CSSProperties
+                            }
+                          />
+                        ) : null}
+                      </td>
+                      <td>
+                        {row.provider_name ||
+                          row.provider_id ||
+                          "供应商 Unavailable"}
+                      </td>
+                      <td>{appLabel(row.app)}</td>
+                      <td>{formatTokens(row.totals.input_tokens_total)}</td>
+                      <td>{formatTokens(row.totals.output_tokens_total)}</td>
+                      <td>
+                        {formatPercent(row.totals.cache_hit_rate_percent)}
+                      </td>
+                      <td>{formatTokens(row.totals.event_count)}</td>
+                      <td>{formatCost(row.totals)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         ) : (
-          <p className="breakdown-empty">当前筛选下没有用量记录。</p>
+          <p className="breakdown-empty">
+            {loading ? "正在读取用量…" : "当前筛选下没有用量记录。"}
+          </p>
         )}
       </section>
 
@@ -770,32 +675,56 @@ export function DashboardView() {
               <p className="section-kicker">Sessions</p>
               <h2>会话</h2>
             </div>
-            <span className="count-label">{sessions.length} 条</span>
+            <span className="count-label">
+              {sessions.length} 条
+              {sessionTotal != null && sessionTotal > sessions.length
+                ? ` / 共 ${sessionTotal}`
+                : ""}
+            </span>
           </div>
           {sessions.length ? (
-            <div className="session-list" role="list">
-              {sessions.map((item) => (
+            <div className="session-list scroll-area" role="list">
+              {sessions.map((item, index) => (
                 <SessionRow
                   key={item.session.id}
+                  index={index}
                   summary={item}
                   selected={item.session.id === selectedSessionId}
-                  onSelect={() => setSelectedSessionId(item.session.id)}
+                  onSelect={() =>
+                    setSelectedSessionId((current) =>
+                      current === item.session.id ? null : item.session.id,
+                    )
+                  }
                 />
               ))}
             </div>
           ) : (
             <EmptyState
-              title="还没有导入会话"
-              description="确认数据源路径并点击“扫描全部来源”，TokenBuddy 会增量导入各来源的用量记录。"
+              compact
+              title={loading ? "正在读取会话…" : "当前筛选下没有会话"}
+              description={
+                loading
+                  ? ""
+                  : "调整时间范围或筛选条件；如果刚安装，点击“扫描全部来源”导入各来源的用量记录。"
+              }
             />
           )}
+          {sessionTotal != null && sessionTotal > sessions.length ? (
+            <div className="panel-foot">
+              <RouteLink to="/sessions">查看全部会话 →</RouteLink>
+            </div>
+          ) : null}
         </div>
 
         <div className="panel detail-panel">
           {visibleDetail ? (
             <SessionDetailView detail={visibleDetail} />
           ) : selectedSession ? (
-            <EmptyState title="正在读取会话详情…" description="" />
+            <div className="detail-loading" aria-label="正在读取会话详情">
+              <span className="skeleton skeleton-title" />
+              <span className="skeleton skeleton-line" />
+              <span className="skeleton skeleton-block" />
+            </div>
           ) : (
             <EmptyState
               title="选择一个会话"
@@ -807,12 +736,65 @@ export function DashboardView() {
 
       <footer className="footer-note">
         <span>
-          {sources.length
-            ? `${sources.length} 个数据源已登记`
-            : "尚未登记数据源"}
+          {sources.length ? (
+            <>
+              {sources.length} 个数据源已登记 ·{" "}
+              <RouteLink to="/sources">查看健康状态</RouteLink>
+            </>
+          ) : (
+            "尚未登记数据源"
+          )}
         </span>
         <span>代理模式未启用 · 数据留在本机</span>
       </footer>
-    </main>
+    </PageFrame>
+  );
+}
+
+function ScanGlyph() {
+  return (
+    <svg
+      className="scan-glyph"
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      aria-hidden="true"
+    >
+      <path
+        d="M13.5 8A5.5 5.5 0 1 1 11.9 4.1M13.5 2.5v3h-3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function SearchGlyph() {
+  return (
+    <svg
+      className="search-glyph"
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      aria-hidden="true"
+    >
+      <circle
+        cx="7"
+        cy="7"
+        r="4.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+      />
+      <path
+        d="m10.5 10.5 3 3"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }

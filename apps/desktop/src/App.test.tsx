@@ -1,6 +1,12 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import App from "./App";
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    isVisible: async () => true,
+    isMinimized: async () => false,
+  }),
+}));
 import {
   detectClaudePath,
   detectCodexPath,
@@ -37,6 +43,8 @@ vi.mock("./lib/api", () => ({
   detectCcSwitchPath: vi.fn(),
   detectCockpitPath: vi.fn(),
   detectDshPath: vi.fn(),
+  detectOfficialQuotaPath: vi.fn(),
+  detectOpenCodePath: vi.fn(),
   getAppSettings: vi.fn(),
   getDashboardSummary: vi.fn(),
   getModelBreakdown: vi.fn(),
@@ -592,16 +600,19 @@ describe("App panels", () => {
     });
   });
 
-  it("does not reserve a detection row before any source is checked", async () => {
-    const { container } = render(<App />);
+  it("keeps path editing off the dashboard", async () => {
+    // Paths typed on the dashboard used to be persisted silently by a scan;
+    // they now live only in Settings, where saving is explicit.
+    render(<App />);
 
-    await screen.findByRole("button", { name: "检测 Codex" });
+    await screen.findByRole("button", { name: "扫描全部来源" });
+    expect(screen.queryByLabelText("Codex Home")).not.toBeInTheDocument();
     expect(
-      container.querySelector(".source-detections"),
+      screen.queryByRole("button", { name: "检测 Codex" }),
     ).not.toBeInTheDocument();
   });
 
-  it("reports each detection independently", async () => {
+  it("detects a typed settings path before saving, each field independently", async () => {
     vi.mocked(detectCodexPath).mockResolvedValue({
       source_id: "codex-session",
       detected: true,
@@ -610,25 +621,48 @@ describe("App panels", () => {
       message: null,
     });
     vi.mocked(detectClaudePath).mockRejectedValue(new Error("路径无效"));
+    window.history.pushState({}, "", "/settings");
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "检测 Codex" }));
+    const codexHome = await screen.findByLabelText("Codex Home");
+    fireEvent.change(codexHome, { target: { value: "/sanitized/codex" } });
+    fireEvent.click(screen.getByRole("button", { name: "Codex Home：检测" }));
     await waitFor(() => {
       expect(
-        screen.getByText("已检测到 Codex Session 目录"),
+        screen.getByText("已检测到 · /sanitized/codex · jsonl"),
       ).toBeInTheDocument();
     });
+    expect(detectCodexPath).toHaveBeenCalledWith("/sanitized/codex");
 
-    // A failing detection surfaces as an error, and does not erase the previous
-    // successful result.
-    fireEvent.click(screen.getByRole("button", { name: "检测 Claude" }));
+    // A failing detection is reported on its own field and does not erase the
+    // previous successful result.
+    fireEvent.click(screen.getByRole("button", { name: "Claude Home：检测" }));
     await waitFor(() => {
-      expect(screen.getByText(/无法检测 Claude Home/)).toBeInTheDocument();
+      expect(screen.getByText("检测失败：路径无效")).toBeInTheDocument();
     });
-    expect(screen.getByText("Codex Detected")).toBeInTheDocument();
+    expect(
+      screen.getByText("已检测到 · /sanitized/codex · jsonl"),
+    ).toBeInTheDocument();
+    // Detecting never saves.
+    expect(updateAppSettings).not.toHaveBeenCalled();
   });
 
-  it("detects the DeepSeek Harness session root from the dashboard", async () => {
+  it("detects a registered source with its saved path from the sources page", async () => {
+    vi.mocked(listSources).mockResolvedValue([
+      {
+        id: "dsh-session",
+        adapter_type: "dsh_session",
+        display_name: "DeepSeek Harness",
+        path_or_endpoint: "/sanitized/.dsh/sessions",
+        enabled: true,
+        detected_version: null,
+        health_status: "not_found",
+        last_success_at: null,
+        last_error: null,
+        created_at: "2026-07-26T07:00:00Z",
+        updated_at: "2026-07-26T08:00:00Z",
+      },
+    ]);
     vi.mocked(detectDshPath).mockResolvedValue({
       source_id: "dsh-session",
       detected: true,
@@ -636,15 +670,15 @@ describe("App panels", () => {
       detected_version: "jsonl-v0",
       message: null,
     });
+    window.history.pushState({}, "", "/sources");
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "检测 DSH" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "检测 DeepSeek Harness" }),
+    );
     await waitFor(() => {
-      expect(
-        screen.getByText("已检测到 DeepSeek Harness 会话目录"),
-      ).toBeInTheDocument();
+      expect(screen.getByText("已检测到 · jsonl-v0")).toBeInTheDocument();
     });
-    expect(screen.getByText("DSH Detected")).toBeInTheDocument();
     expect(detectDshPath).toHaveBeenCalledWith(null);
   });
 
@@ -737,6 +771,7 @@ describe("App panels", () => {
   });
 
   it("opens the local web panel and reports why it could not start", async () => {
+    vi.mocked(isDesktopRuntime).mockReturnValue(true);
     vi.mocked(openLocalWebApi).mockResolvedValue({
       running: true,
       url: "http://127.0.0.1:5173",
@@ -755,6 +790,46 @@ describe("App panels", () => {
     await waitFor(() => {
       expect(screen.getByText(/无法启动本地网页面板/)).toBeInTheDocument();
     });
+  });
+
+  it("does not offer to open the web panel from inside the web panel", async () => {
+    vi.mocked(isDesktopRuntime).mockReturnValue(false);
+    render(<App />);
+
+    await screen.findByRole("button", { name: "扫描全部来源" });
+    expect(
+      screen.queryByRole("button", { name: "本地网页" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("lets a port be typed digit by digit and only parses it on save", async () => {
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+
+    await screen.findByText("设置已加载");
+    const port = screen.getByLabelText(/OTLP HTTP 端口/);
+    // "8" alone is out of range; it must stay in the field on the way to 8080.
+    fireEvent.change(port, { target: { value: "8" } });
+    expect(port).toHaveValue(8);
+    expect(screen.getByText("有未保存的修改")).toBeInTheDocument();
+    fireEvent.change(port, { target: { value: "8080" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => {
+      expect(updateAppSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ otel_port: 8080 }),
+      );
+    });
+  });
+
+  it("does not let a failed settings read be saved back as blank defaults", async () => {
+    vi.mocked(getAppSettings).mockRejectedValue(new Error("核心不可用"));
+    window.history.pushState({}, "", "/settings");
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText("设置不可用")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "保存设置" })).toBeDisabled();
   });
 
   it("saves settings and surfaces a rejected save", async () => {
@@ -924,6 +999,7 @@ describe("App panels", () => {
   });
 
   it("reports a dashboard query failure", async () => {
+    vi.mocked(isDesktopRuntime).mockReturnValue(true);
     vi.mocked(getDashboardSummary).mockRejectedValue(new Error("核心不可用"));
     render(<App />);
 
@@ -1138,61 +1214,48 @@ describe("Dashboard filters and navigation", () => {
     });
   });
 
-  it("keeps the source path fields editable", async () => {
+  it("scans every source with the paths saved in Settings", async () => {
     render(<App />);
+    await screen.findByRole("button", { name: "扫描全部来源" });
 
-    const codexHome = await screen.findByLabelText("Codex Home");
-    fireEvent.change(codexHome, { target: { value: "/sanitized/codex" } });
-    expect(codexHome).toHaveValue("/sanitized/codex");
-
-    for (const [label, value] of [
-      ["Claude Home", "/sanitized/claude"],
-      ["CC-Switch DB", "/sanitized/cc.db"],
-      ["Cockpit DB", "/sanitized/cockpit.sqlite"],
-    ] as const) {
-      const field = screen.getByLabelText(label);
-      fireEvent.change(field, { target: { value } });
-      expect(field).toHaveValue(value);
+    // A scan never passes a path, so it can never rewrite the saved settings.
+    const report = {
+      inserted_events: 0,
+      duplicate_events: 0,
+      upserted_sessions: 0,
+      updated_cursors: 0,
+      skipped_records: 0,
+      warning: null,
+    };
+    for (const rescan of [
+      rescanCodex,
+      rescanClaude,
+      rescanCcSwitch,
+      rescanCockpit,
+      rescanDsh,
+    ]) {
+      vi.mocked(rescan).mockResolvedValue(report);
     }
-
-    // The typed path is what the scan uses, not the stored default.
-    vi.mocked(rescanCodex).mockResolvedValue({
-      inserted_events: 0,
-      duplicate_events: 0,
-      upserted_sessions: 0,
-      updated_cursors: 0,
-      skipped_records: 0,
-      warning: null,
-    });
-    vi.mocked(rescanClaude).mockResolvedValue({
-      inserted_events: 0,
-      duplicate_events: 0,
-      upserted_sessions: 0,
-      updated_cursors: 0,
-      skipped_records: 0,
-      warning: null,
-    });
-    vi.mocked(rescanCcSwitch).mockResolvedValue({
-      inserted_events: 0,
-      duplicate_events: 0,
-      upserted_sessions: 0,
-      updated_cursors: 0,
-      skipped_records: 0,
-      warning: null,
-    });
-    vi.mocked(rescanCockpit).mockResolvedValue({
-      inserted_events: 0,
-      duplicate_events: 0,
-      upserted_sessions: 0,
-      updated_cursors: 0,
-      skipped_records: 0,
-      warning: null,
-    });
     fireEvent.click(screen.getByRole("button", { name: "扫描全部来源" }));
     await waitFor(() => {
-      expect(rescanCodex).toHaveBeenCalledWith("/sanitized/codex");
+      expect(rescanCodex).toHaveBeenCalledWith(null);
     });
-    expect(rescanCockpit).toHaveBeenCalledWith("/sanitized/cockpit.sqlite");
+    expect(rescanClaude).toHaveBeenCalledWith(null);
+    expect(rescanCcSwitch).toHaveBeenCalledWith(null);
+    expect(rescanCockpit).toHaveBeenCalledWith(null);
+    expect(rescanDsh).toHaveBeenCalledWith(null);
+  });
+
+  it("marks the current route in the navigation", async () => {
+    window.history.pushState({}, "", "/sessions/codex-session%3Aabc");
+    render(<App />);
+
+    // A session detail still belongs to the sessions section.
+    const current = await screen.findByRole("link", { current: "page" });
+    expect(current).toHaveTextContent("会话");
+    expect(screen.getByRole("link", { name: "总览" })).not.toHaveAttribute(
+      "aria-current",
+    );
   });
 
   it("opens a session's detail from the list", async () => {

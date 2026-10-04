@@ -71,6 +71,7 @@ export function appLabel(app: string | null | undefined): string {
 export function authModeLabel(authMode: string): string {
   const labels: Record<string, string> = {
     chatgpt: "ChatGPT 官方登录",
+    subscription_session: "Claude 官方窗口 · 会话范围",
     api_key: "API Key",
     session_log: "会话日志推断",
   };

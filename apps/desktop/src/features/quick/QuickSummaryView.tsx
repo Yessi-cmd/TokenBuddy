@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { startPolling } from "../../lib/polling";
 
 import {
   fitQuickWindowToContent,
@@ -68,13 +69,10 @@ export function QuickSummaryView() {
       }
     }
 
-    void loadSummary();
-    const timer = window.setInterval(() => {
-      void loadSummary();
-    }, 2000);
+    const stop = startPolling(loadSummary, 2000);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      stop();
       document.documentElement.classList.remove("quick-window");
       document.body.classList.remove("quick-window");
     };
@@ -132,7 +130,11 @@ export function QuickSummaryView() {
           label="今日 Token"
           sublabel="输入 + 输出 · 未知不折算成 0"
           trailing={
-            <span className="menu-hero-value">
+            // Keyed by value so each change replays the highlight animation.
+            <span
+              className="menu-hero-value"
+              key={summary?.today_total_tokens ?? "unavailable"}
+            >
               {formatTokens(summary?.today_total_tokens)}
             </span>
           }
@@ -207,6 +209,25 @@ export function QuickSummaryView() {
             </button>
           }
         />
+        {quota &&
+        quota.window_type !== "credits" &&
+        quota.used_percent != null ? (
+          <span className="menu-meter" aria-hidden="true">
+            <span
+              className="menu-meter-fill"
+              data-level={
+                quota.used_percent >= 90
+                  ? "danger"
+                  : quota.used_percent >= 70
+                    ? "warn"
+                    : undefined
+              }
+              style={{
+                width: `${Math.max(0, Math.min(100, quota.used_percent))}%`,
+              }}
+            />
+          </span>
+        ) : null}
         {quota?.reset_at ? (
           <p className="menu-caption menu-quota-reset">
             重置：{formatDate(quota.reset_at)}
